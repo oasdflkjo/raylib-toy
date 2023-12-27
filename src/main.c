@@ -1,3 +1,6 @@
+
+// TODO: compiling with this def undef mess feels like a good old hack and slash
+
 #define RAYLIB_CUSTOM_RAYLIB_H
 #include "raylib.h"
 
@@ -15,7 +18,7 @@
 #include <stdlib.h>
 #include <math.h>
 
-#define PARTICLE_COUNT 100000
+#define PARTICLE_COUNT 200000
 #define MAX_THREADS 64
 
 #ifndef min

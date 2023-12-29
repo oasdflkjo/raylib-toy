@@ -1,8 +1,9 @@
+// make clean includes cos this hacking to avoid name collitions
+
 #define RAYLIB_CUSTOM_RAYLIB_H
 #include "raylib.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
+
 
 #define Rectangle _Rectangle
 #define CloseWindow _CloseWindow
@@ -14,24 +15,17 @@
 
 #include <stdlib.h>
 #include <math.h>
-
 #include <stdio.h>
-
-#include <xmmintrin.h> // SSE
-
-
-
-#ifndef min
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#endif
+#include <xmmintrin.h>
 
 #define PARTICLE_COUNT 120000
+#define PARTICLE_COLOR (Color){0, 0, 0, 255}
 #define MAX_THREADS 12
 #define ALIGNMENT 16
 #define FRAME_HISTORY_COUNT 10
 #define TARGET_FPS 160
 #define ATTRACTION_STRENGHT 0.2000f
-#define FRICTION 0.998f
+#define FRICTION 0.999f
 #define SCREEN_WIDTH 800
 #define SCREEN_HEIGHT 800
 
@@ -41,7 +35,6 @@ typedef struct Particles
     float *posY;
     float *velX;
     float *velY;
-    Color *colors;
 } Particles;
 
 typedef struct {
@@ -63,11 +56,11 @@ static float globalFriction = FRICTION;
 
 int main()
 {
-    InitWindow(800, 800, "Particle Effect in C");
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Particle Effect in C");
 
     double frameTimes[FRAME_HISTORY_COUNT] = {0};
     int frameCount = 0;
-    Particles particles = CreateParticles(PARTICLE_COUNT, 800, 800);
+    Particles particles = CreateParticles(PARTICLE_COUNT, SCREEN_WIDTH, SCREEN_HEIGHT);
 
     SetTargetFPS(TARGET_FPS);
 
@@ -123,7 +116,6 @@ Particles CreateParticles(int count, int screenWidth, int screenHeight)
     p.posY = (float *)_aligned_malloc(count * sizeof(float), ALIGNMENT);
     p.velX = (float *)_aligned_malloc(count * sizeof(float), ALIGNMENT);
     p.velY = (float *)_aligned_malloc(count * sizeof(float), ALIGNMENT);
-    p.colors = (Color *)_aligned_malloc(count * sizeof(Color), ALIGNMENT);
 
     for (int i = 0; i < count; i++)
     {
@@ -131,7 +123,6 @@ Particles CreateParticles(int count, int screenWidth, int screenHeight)
         p.posY[i] = GetRandomValue(0, screenHeight - 1);
         p.velX[i] = GetRandomValue(-100, 100) / 100.0f;
         p.velY[i] = GetRandomValue(-100, 100) / 100.0f;
-        p.colors[i] = (Color){0, 0, 0, 100};
     }
 
     return p;
@@ -143,7 +134,7 @@ DWORD WINAPI UpdateParticlesSubset(LPVOID param) {
     Vector2 mousePos = threadArgs->mousePos;
 
     for (int i = threadArgs->start; i < threadArgs->end; i += 4) {
-                // Load positions and velocities of 4 particles into SIMD registers
+        // Load positions and velocities of 4 particles into SIMD registers
         __m128 posX = _mm_load_ps(&particles->posX[i]);
         __m128 posY = _mm_load_ps(&particles->posY[i]);
         __m128 velX = _mm_load_ps(&particles->velX[i]);
@@ -212,6 +203,7 @@ void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos) {
     }
 }
 
+// TODO: filter out particles outside the window
 void DrawParticles(Particles *particles, int count) {
     for (int i = 0; i < count; i++) {
         int x = (int)particles->posX[i];
@@ -221,8 +213,7 @@ void DrawParticles(Particles *particles, int count) {
         if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT &&
             !drawnPixels[y * SCREEN_WIDTH + x]) {
             
-            Color color = particles->colors[i];
-            DrawRectangle(x, y, 2, 2, color);
+            DrawRectangle(x, y, 2, 2, PARTICLE_COLOR);
 
             // Mark these pixels as drawn
             drawnPixels[y * SCREEN_WIDTH + x] = 1;
@@ -248,5 +239,4 @@ void FreeParticles(Particles *particles)
     _aligned_free(particles->posY);
     _aligned_free(particles->velX);
     _aligned_free(particles->velY);
-    _aligned_free(particles->colors);
 }

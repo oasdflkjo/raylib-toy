@@ -1,6 +1,3 @@
-
-// TODO: compiling with this def undef mess feels like a good old hack and slash
-
 #define RAYLIB_CUSTOM_RAYLIB_H
 #include "raylib.h"
 
@@ -18,133 +15,238 @@
 #include <stdlib.h>
 #include <math.h>
 
-#define PARTICLE_COUNT 200000
-#define MAX_THREADS 64
+#include <stdio.h>
+
+#include <xmmintrin.h> // SSE
+
+
 
 #ifndef min
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
-typedef struct Particle {
-    Vector2 pos;
-    Vector2 vel;
-    Color color;
-} Particle;
+#define PARTICLE_COUNT 120000
+#define MAX_THREADS 12
+#define ALIGNMENT 16
+#define FRAME_HISTORY_COUNT 10
+#define TARGET_FPS 160
+#define ATTRACTION_STRENGHT 0.2000f
+#define FRICTION 0.998f
+#define SCREEN_WIDTH 800
+#define SCREEN_HEIGHT 800
 
-typedef struct ThreadData {
+typedef struct Particles
+{
+    float *posX;
+    float *posY;
+    float *velX;
+    float *velY;
+    Color *colors;
+} Particles;
+
+typedef struct {
     int start;
     int end;
-    Particle* particles;
+    Particles *particles;
     Vector2 mousePos;
-} ThreadData;
+} ThreadArgs;
 
-Particle CreateParticle(int screenWidth, int screenHeight);
-void UpdateParticles(void* data);
-void Attract(Particle* p, Vector2 toPos);
-void ApplyFriction(Particle* p, float amount);
-void MoveParticle(Particle* p, int screenWidth, int screenHeight);
-void DrawParticle(Particle p);
 
-const int screenWidth = 800;
-const int screenHeight = 800;
+Particles CreateParticles(int count, int screenWidth, int screenHeight);
+void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos);
+void DrawParticles(Particles *particles, int count);
+void FreeParticles(Particles *particles);
 
-int main() {
-    SYSTEM_INFO sysinfo;
-    GetSystemInfo(&sysinfo);
-    int numThreads = min(sysinfo.dwNumberOfProcessors, MAX_THREADS);
+unsigned char drawnPixels[SCREEN_WIDTH * SCREEN_HEIGHT] = {0};
+static float globalAttractionStrength = ATTRACTION_STRENGHT;
+static float globalFriction = FRICTION;
 
-    InitWindow(screenWidth, screenHeight, "Particle Effect in C");
+int main()
+{
+    InitWindow(800, 800, "Particle Effect in C");
 
-    Particle* particles = (Particle*) malloc(PARTICLE_COUNT * sizeof(Particle));
-    for (int i = 0; i < PARTICLE_COUNT; i++) {
-        particles[i] = CreateParticle(screenWidth, screenHeight);
-    }
+    double frameTimes[FRAME_HISTORY_COUNT] = {0};
+    int frameCount = 0;
+    Particles particles = CreateParticles(PARTICLE_COUNT, 800, 800);
 
-    HANDLE threadHandles[MAX_THREADS];
-    ThreadData threadData[MAX_THREADS];
+    SetTargetFPS(TARGET_FPS);
 
-    SetTargetFPS(60);
+    while (!WindowShouldClose())
+    {
 
-    while (!WindowShouldClose()) {
+        if (IsKeyPressed(KEY_UP))
+        {
+            globalAttractionStrength += 0.0005f;
+            TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
+        }
+        if (IsKeyPressed(KEY_DOWN))
+        {
+            globalAttractionStrength -= 0.0005f;
+                    TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
+        }
+        if (IsKeyPressed(KEY_RIGHT))
+        {
+            globalFriction += 0.0005f;
+                    TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
+        }
+        if (IsKeyPressed(KEY_LEFT))
+        {
+            globalFriction -= 0.0005f;
+                    TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
+        }
+        double startTime = GetTime();
+
         Vector2 mousePos = GetMousePosition();
+        UpdateParticlesMultithreaded(&particles, mousePos);
 
-        int chunkSize = PARTICLE_COUNT / numThreads;
-        for (int i = 0; i < numThreads; i++) {
-            threadData[i].start = i * chunkSize;
-            threadData[i].end = (i == numThreads - 1) ? PARTICLE_COUNT : (i + 1) * chunkSize;
-            threadData[i].particles = particles;
-            threadData[i].mousePos = mousePos;
-
-            threadHandles[i] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)UpdateParticles, &threadData[i], 0, NULL);
-        }
-
-        WaitForMultipleObjects(numThreads, threadHandles, TRUE, INFINITE);
-
-        for (int i = 0; i < numThreads; i++) {
-            CloseHandle(threadHandles[i]);
-        }
+        double endTime = GetTime();
+        frameTimes[frameCount % FRAME_HISTORY_COUNT] = endTime - startTime;
+        frameCount++;
 
         BeginDrawing();
-            ClearBackground(RAYWHITE);
-            for (int i = 0; i < PARTICLE_COUNT; i++) {
-                DrawParticle(particles[i]);
-            }
-            DrawFPS(10, 10);
+        ClearBackground(RAYWHITE);
+        DrawParticles(&particles, PARTICLE_COUNT);
+        DrawFPS(10, 10);
+        char infoText[128];
         EndDrawing();
     }
 
-    free(particles);
-    CloseWindow(); // Use the Raylib function with the custom naming if required
-
+    FreeParticles(&particles);
+    CloseWindow();
     return 0;
 }
 
-Particle CreateParticle(int screenWidth, int screenHeight) {
-    Particle p;
-    p.pos.x = GetRandomValue(0, screenWidth - 1);
-    p.pos.y = GetRandomValue(0, screenHeight - 1);
-    p.vel.x = GetRandomValue(-100, 100) / 100.0f;
-    p.vel.y = GetRandomValue(-100, 100) / 100.0f;
-    p.color = (Color){ 0, 0, 0, 100 };
+Particles CreateParticles(int count, int screenWidth, int screenHeight)
+{
+    Particles p;
+    p.posX = (float *)_aligned_malloc(count * sizeof(float), ALIGNMENT);
+    p.posY = (float *)_aligned_malloc(count * sizeof(float), ALIGNMENT);
+    p.velX = (float *)_aligned_malloc(count * sizeof(float), ALIGNMENT);
+    p.velY = (float *)_aligned_malloc(count * sizeof(float), ALIGNMENT);
+    p.colors = (Color *)_aligned_malloc(count * sizeof(Color), ALIGNMENT);
+
+    for (int i = 0; i < count; i++)
+    {
+        p.posX[i] = GetRandomValue(0, screenWidth - 1);
+        p.posY[i] = GetRandomValue(0, screenHeight - 1);
+        p.velX[i] = GetRandomValue(-100, 100) / 100.0f;
+        p.velY[i] = GetRandomValue(-100, 100) / 100.0f;
+        p.colors[i] = (Color){0, 0, 0, 100};
+    }
+
     return p;
 }
 
-void UpdateParticles(void* data) {
-    ThreadData* threadData = (ThreadData*)data;
-    for (int i = threadData->start; i < threadData->end; i++) {
-        Attract(&threadData->particles[i], threadData->mousePos);
-        ApplyFriction(&threadData->particles[i], 0.99f);
-        MoveParticle(&threadData->particles[i], screenWidth, screenHeight);
+DWORD WINAPI UpdateParticlesSubset(LPVOID param) {
+    ThreadArgs *threadArgs = (ThreadArgs *)param;
+    Particles *particles = threadArgs->particles;
+    Vector2 mousePos = threadArgs->mousePos;
+
+    for (int i = threadArgs->start; i < threadArgs->end; i += 4) {
+                // Load positions and velocities of 4 particles into SIMD registers
+        __m128 posX = _mm_load_ps(&particles->posX[i]);
+        __m128 posY = _mm_load_ps(&particles->posY[i]);
+        __m128 velX = _mm_load_ps(&particles->velX[i]);
+        __m128 velY = _mm_load_ps(&particles->velY[i]);
+
+        // Load mouse position into SIMD registers
+        __m128 mouseX = _mm_set1_ps(mousePos.x);
+        __m128 mouseY = _mm_set1_ps(mousePos.y);
+
+        // Compute differences
+        __m128 diffX = _mm_sub_ps(mouseX, posX);
+        __m128 diffY = _mm_sub_ps(mouseY, posY);
+
+        // Compute distance squared and distance
+        __m128 distSq = _mm_add_ps(_mm_mul_ps(diffX, diffX), _mm_mul_ps(diffY, diffY));
+        __m128 dist = _mm_sqrt_ps(distSq);
+
+        // Normalize diff vector
+        __m128 normX = _mm_div_ps(diffX, dist);
+        __m128 normY = _mm_div_ps(diffY, dist);
+
+        // Compute attraction force (this is a basic example, you might want a more complex calculation)
+        __m128 attraction = _mm_set1_ps(globalAttractionStrength); // Attraction strength
+        velX = _mm_add_ps(velX, _mm_mul_ps(normX, attraction));
+        velY = _mm_add_ps(velY, _mm_mul_ps(normY, attraction));
+
+        // Apply friction
+        __m128 friction = _mm_set1_ps(globalFriction);
+        velX = _mm_mul_ps(velX, friction);
+        velY = _mm_mul_ps(velY, friction);
+
+        // Update positions
+        posX = _mm_add_ps(posX, velX);
+        posY = _mm_add_ps(posY, velY);
+
+        // Store updated positions and velocities back
+        _mm_store_ps(&particles->posX[i], posX);
+        _mm_store_ps(&particles->posY[i], posY);
+        _mm_store_ps(&particles->velX[i], velX);
+        _mm_store_ps(&particles->velY[i], velY);
     }
 }
 
-void Attract(Particle* p, Vector2 toPos) {
-    Vector2 diff = { toPos.x - p->pos.x, toPos.y - p->pos.y };
-    float distance = sqrtf(diff.x * diff.x + diff.y * diff.y);
-    distance = (distance < 0.5f) ? 0.5f : distance; // Prevent division by zero
+void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos) {
+    const int threadCount = MAX_THREADS;
+    HANDLE threads[threadCount];
+    ThreadArgs args[threadCount];
 
-    Vector2 norm = { diff.x / distance, diff.y / distance };
+    int particlesPerThread = PARTICLE_COUNT / threadCount;
 
-    p->vel.x += norm.x / distance;
-    p->vel.y += norm.y / distance;
+    for (int i = 0; i < threadCount; i++) {
+        args[i].start = i * particlesPerThread;
+        args[i].end = (i + 1) * particlesPerThread;
+        args[i].particles = particles;
+        args[i].mousePos = mousePos;
+
+        threads[i] = CreateThread(NULL, 0, UpdateParticlesSubset, &args[i], 0, NULL);
+        if (threads[i] == NULL) {
+            // Handle thread creation error
+        }
+    }
+
+    for (int i = 0; i < threadCount; i++) {
+        WaitForSingleObject(threads[i], INFINITE);
+        CloseHandle(threads[i]);
+    }
 }
 
-void ApplyFriction(Particle* p, float amount) {
-    p->vel.x *= amount;
-    p->vel.y *= amount;
+void DrawParticles(Particles *particles, int count) {
+    for (int i = 0; i < count; i++) {
+        int x = (int)particles->posX[i];
+        int y = (int)particles->posY[i];
+
+        // Check bounds and if pixel is already drawn
+        if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT &&
+            !drawnPixels[y * SCREEN_WIDTH + x]) {
+            
+            Color color = particles->colors[i];
+            DrawRectangle(x, y, 2, 2, color);
+
+            // Mark these pixels as drawn
+            drawnPixels[y * SCREEN_WIDTH + x] = 1;
+            if (x + 1 < SCREEN_WIDTH) {
+                drawnPixels[y * SCREEN_WIDTH + (x + 1)] = 1;
+            }
+            if (y + 1 < SCREEN_HEIGHT) {
+                drawnPixels[(y + 1) * SCREEN_WIDTH + x] = 1;
+                if (x + 1 < SCREEN_WIDTH) {
+                    drawnPixels[(y + 1) * SCREEN_WIDTH + (x + 1)] = 1;
+                }
+            }
+        }
+    }
+
+    // Reset drawnPixels for the next frame
+    memset(drawnPixels, 0, sizeof(drawnPixels));
 }
 
-void MoveParticle(Particle* p, int screenWidth, int screenHeight) {
-    p->pos.x += p->vel.x;
-    p->pos.y += p->vel.y;
-
-    if (p->pos.x < 0) p->pos.x += screenWidth;
-    else if (p->pos.x >= screenWidth) p->pos.x -= screenWidth;
-
-    if (p->pos.y < 0) p->pos.y += screenHeight;
-    else if (p->pos.y >= screenHeight) p->pos.y -= screenHeight;
-}
-
-void DrawParticle(Particle p) {
-    DrawPixelV(p.pos, p.color);
+void FreeParticles(Particles *particles)
+{
+    _aligned_free(particles->posX);
+    _aligned_free(particles->posY);
+    _aligned_free(particles->velX);
+    _aligned_free(particles->velY);
+    _aligned_free(particles->colors);
 }

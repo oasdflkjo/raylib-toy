@@ -1,6 +1,6 @@
 # Raylib-Toy
 
-A simple program to generate particle effects, featuring an windows multithreading and simd. This project utilizes [Raylib](https://www.raylib.com/), a simple and easy-to-use library to enjoy videogames programming.
+A simple program to generate particle effects, featuring an windows multithreading and SIMD. This project utilizes [Raylib](https://www.raylib.com/), a simple and easy-to-use library to enjoy videogames programming.
 
 - Simulating 720,000 moving particles at 160fps
 - Multithreading

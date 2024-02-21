@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -I./external/raylib/src -msse4.1 -O3
-LDFLAGS = -L./external/raylib/src -lraylib -lopengl32 -lgdi32 -lwinmm -luser32 -lshell32 -lm -lpthread
+CFLAGS = -I./external/raylib/src -msse4.1 -Ofast -Wall -Wextra -pedantic
+LDFLAGS = -L./external/raylib/src -Wall -lraylib -lopengl32 -lgdi32 -lwinmm -luser32 -lshell32 -lm -lpthread
 
 all: raylib main
 

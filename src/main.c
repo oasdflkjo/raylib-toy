@@ -148,6 +148,7 @@ DWORD WINAPI UpdateParticlesSubset(LPVOID param)
         _mm_store_ps(&particles->velX[i], velX);
         _mm_store_ps(&particles->velY[i], velY);
     }
+    return 0;
 }
 
 void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos)

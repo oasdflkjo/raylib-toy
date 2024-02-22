@@ -8,21 +8,21 @@
 #undef CloseWindow
 #undef ShowCursor
 
-// #include <xmmintrin.h>
 #include <immintrin.h> // AVX2 and earlier intrinsics
 #include <assert.h>
 #include <time.h>
 
-#define PARTICLE_COUNT 360000 //1440000 // TODO: crashes if used for example 130000
+#define PARTICLE_COUNT 1440000 // 360000 // 1440000 // TODO: crashes if used for example 130000
 #define PARTICLE_COLOR \
     (Color) { 0, 0, 0, 255 }
-#define MAX_THREADS 16
+#define MAX_THREADS 12
 #define ALIGNMENT 16
 #define TARGET_FPS 160
 #define ATTRACTION_STRENGHT 0.2000f
 #define FRICTION 0.999f
 #define SCREEN_WIDTH 3440
 #define SCREEN_HEIGHT 1440
+#define PARTICLES_PER_CHUNK 80000
 
 typedef struct Particles
 {
@@ -40,14 +40,35 @@ typedef struct
     Vector2 mousePos;
 } ThreadArgs;
 
-Particles CreateParticles(int count, int screenWidth, int screenHeight);
-void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos);
-void FreeParticles(Particles *particles);
-void HandleKeys(void);
-void UpdateOffScreenBufferWithParticles(Particles *particles, Texture2D *offScreenBuffer);
 
-static float globalAttractionStrength = ATTRACTION_STRENGHT;
-static float globalFriction = FRICTION;
+Particles CreateParticles(int count, int screenWidth, int screenHeight);
+void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos, PTP_POOL pool, PTP_CALLBACK_ENVIRON *pCallBackEnviron);
+
+void FreeParticles(Particles *particles);
+
+void UpdateOffScreenBufferWithParticles(Particles *particles, Texture2D *offScreenBuffer, Color *pixels);
+/**
+ * @brief Callback function for updating particle positions using AVX2 instructions.
+ *
+ * This function is designed to be used with a thread pool, where each invocation
+ * updates a subset of the total particles based on AVX2 SIMD instructions for
+ * improved performance. It calculates new positions and velocities for each particle
+ * in the subset by applying attraction and friction forces, considering the current
+ * mouse position as a point of attraction.
+ *
+ * @param Instance Unused parameter provided by the thread pool, required for callback signature compatibility.
+ * @param Context Pointer to a user-defined `ThreadArgs` structure containing the subset of particles to update,
+ * the overall particle data, and the current mouse position.
+ * @param Work Unused parameter provided by the thread pool, required for callback signature compatibility.
+ *
+ * @note The `Instance` and `Work` parameters are part of the function signature required by the thread pool API
+ * but are not used within this function. They are explicitly cast to void to avoid compiler warnings.
+ *
+ * The function divides the update process into segments processed in parallel, leveraging the
+ * AVX2 instruction set for efficient computation. It directly modifies the positions and velocities
+ * of particles in the provided `ThreadArgs` structure.
+ */
+void CALLBACK UpdateParticlesWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work);
 
 int main()
 {
@@ -57,6 +78,19 @@ int main()
     int screenWidth = GetMonitorWidth(0);
     int screenHeight = GetMonitorHeight(0);
 
+    // Allocate the pixels buffer
+    Color *pixels = (Color *)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(Color));
+    if (!pixels)
+    {
+        // Handle allocation failure
+        return -1;
+    }
+
+    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++)
+    {
+        pixels[i] = BLANK;
+    }
+
     // Initialize the Raylib window
     InitWindow(screenWidth, screenHeight, "Particle Effect in C");
 
@@ -64,9 +98,9 @@ int main()
     // Note: As of my last update, you might need to check if Raylib has introduced a direct function or flag for this
     ToggleFullscreen(); // This can make it fullscreen, but it might not be exactly what you're looking for in "windowed fullscreen"
     SetWindowState(FLAG_FULLSCREEN_MODE);
-    //SetWindowState(FLAG_WINDOW_UNDECORATED); // Hides the window border
-    //SetWindowState(FLAG_WINDOW_RESIZABLE);   // Optional: Make the window resizable
-    // Set the window position to zero to ensure it fills the entire screen
+    // SetWindowState(FLAG_WINDOW_UNDECORATED); // Hides the window border
+    // SetWindowState(FLAG_WINDOW_RESIZABLE);   // Optional: Make the window resizable
+    //  Set the window position to zero to ensure it fills the entire screen
     SetWindowPosition(0, 0);
 
     Image particleImage = GenImageColor(SCREEN_WIDTH, SCREEN_HEIGHT, BLANK);
@@ -78,13 +112,53 @@ int main()
 
     SetTargetFPS(TARGET_FPS);
 
+    // Initialize the thread pool environment
+    TP_CALLBACK_ENVIRON CallBackEnviron;
+    PTP_POOL pool = NULL;
+    InitializeThreadpoolEnvironment(&CallBackEnviron);
+
+    pool = CreateThreadpool(NULL);
+    if (!pool) {
+        // Handle error
+        return -1;
+    }
+    SetThreadpoolCallbackPool(&CallBackEnviron, pool);
+
     while (!WindowShouldClose())
     {
-        HandleKeys();
-
         Vector2 mousePos = GetMousePosition();
-        UpdateParticlesMultithreaded(&particles, mousePos);
-        UpdateOffScreenBufferWithParticles(&particles, &offScreenBuffer);
+
+        int totalChunks = (PARTICLE_COUNT + PARTICLES_PER_CHUNK - 1) / PARTICLES_PER_CHUNK;
+
+        for (int chunk = 0; chunk < totalChunks; chunk++)
+        {
+            int start = chunk * PARTICLES_PER_CHUNK;
+            int end = start + PARTICLES_PER_CHUNK;
+            if (end > PARTICLE_COUNT)
+            {
+                end = PARTICLE_COUNT;
+            }
+
+            // Prepare arguments for this chunk
+            ThreadArgs *args = malloc(sizeof(ThreadArgs)); // Ensure to free this in your callback or after waiting for tasks
+            args->start = start;
+            args->end = end;
+            args->particles = &particles;
+            args->mousePos = mousePos;
+
+            PTP_WORK work = CreateThreadpoolWork(UpdateParticlesWorkCallback, args, &CallBackEnviron);
+            if (!work)
+            {
+                // Handle error
+                free(args);
+            }
+            else
+            {
+                SubmitThreadpoolWork(work);
+            }
+        }
+
+        UpdateOffScreenBufferWithParticles(&particles, &offScreenBuffer, pixels);
 
         BeginDrawing();
         ClearBackground(RAYWHITE);
@@ -93,6 +167,14 @@ int main()
         EndDrawing();
     }
 
+    // At the end of your program
+    if (pixels)
+    {
+        free(pixels);
+        pixels = NULL; // Prevent use-after-free errors
+    }
+    CloseThreadpool(pool);
+    DestroyThreadpoolEnvironment(&CallBackEnviron);
     FreeParticles(&particles);
     CloseWindow();
     return 0;
@@ -117,14 +199,83 @@ Particles CreateParticles(int count, int screenWidth, int screenHeight)
     return p;
 }
 
-DWORD WINAPI UpdateParticlesSubset(LPVOID param)
-{
-    ThreadArgs *threadArgs = (ThreadArgs *)param;
-    Particles *particles = threadArgs->particles;
-    Vector2 mousePos = threadArgs->mousePos;
+void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos, PTP_POOL pool, PTP_CALLBACK_ENVIRON *pCallBackEnviron) {
+    (void)pool;
+    const int threadCount = MAX_THREADS;
+    PTP_WORK workItems[threadCount];
+    ThreadArgs args[threadCount];
+    int particlesPerThread = PARTICLE_COUNT / threadCount;
 
-    for (int i = threadArgs->start; i < threadArgs->end; i += 4)
+    for (int i = 0; i < threadCount; i++) {
+        args[i].start = i * particlesPerThread;
+        args[i].end = (i + 1) * particlesPerThread;
+        args[i].particles = particles;
+        args[i].mousePos = mousePos;
+
+        // Create a work item for the thread pool
+        workItems[i] = CreateThreadpoolWork(UpdateParticlesWorkCallback, &args[i], pCallBackEnviron);
+        if (workItems[i] == NULL) {
+            // Handle error
+        }
+
+        // Submit the work item
+        SubmitThreadpoolWork(workItems[i]);
+    }
+
+    // Wait for all work items to complete
+    for (int i = 0; i < threadCount; i++) {
+        WaitForThreadpoolWorkCallbacks(workItems[i], FALSE);
+        CloseThreadpoolWork(workItems[i]);
+    }
+}
+
+
+void FreeParticles(Particles *particles)
+{
+    _aligned_free(particles->posX);
+    _aligned_free(particles->posY);
+    _aligned_free(particles->velX);
+    _aligned_free(particles->velY);
+}
+
+void UpdateOffScreenBufferWithParticles(Particles *particles, Texture2D *offScreenBuffer, Color *pixels)
+{
+    // Assuming 'pixels' is accessible here, either as a global or passed as an argument
+
+    // Reset pixel data to BLANK at the start of each frame
+    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++)
     {
+        pixels[i] = BLANK;
+    }
+
+    // Set particle pixels
+    for (int i = 0; i < PARTICLE_COUNT; i++)
+    {
+        int x = (int)particles->posX[i];
+        int y = (int)particles->posY[i];
+
+        if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT)
+        {
+            pixels[y * SCREEN_WIDTH + x] = PARTICLE_COLOR;
+        }
+    }
+
+    // Update the texture with the pixels data
+    UpdateTexture(*offScreenBuffer, pixels);
+}
+
+void CALLBACK UpdateParticlesWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+{
+    // Explicitly mark unused parameters to avoid warnings
+    (void)Instance;
+    (void)Work;
+    ThreadArgs *args = (ThreadArgs *)Context;
+
+    Particles *particles = args->particles;
+    Vector2 mousePos = args->mousePos;
+
+    for (int i = args->start; i < args->end; i += 8)
+    { // Adjusted for AVX2 processing 8 floats at a time
         __m256 posX = _mm256_load_ps(&particles->posX[i]);
         __m256 posY = _mm256_load_ps(&particles->posY[i]);
         __m256 velX = _mm256_load_ps(&particles->velX[i]);
@@ -145,12 +296,12 @@ DWORD WINAPI UpdateParticlesSubset(LPVOID param)
         __m256 normY = _mm256_div_ps(diffY, dist);
 
         // Compute attraction force using AVX
-        __m256 attraction = _mm256_set1_ps(globalAttractionStrength);
+        __m256 attraction = _mm256_set1_ps(ATTRACTION_STRENGHT);
         velX = _mm256_add_ps(velX, _mm256_mul_ps(normX, attraction));
         velY = _mm256_add_ps(velY, _mm256_mul_ps(normY, attraction));
 
         // Apply friction using AVX
-        __m256 friction = _mm256_set1_ps(globalFriction);
+        __m256 friction = _mm256_set1_ps(FRICTION);
         velX = _mm256_mul_ps(velX, friction);
         velY = _mm256_mul_ps(velY, friction);
 
@@ -163,95 +314,5 @@ DWORD WINAPI UpdateParticlesSubset(LPVOID param)
         _mm256_store_ps(&particles->posY[i], posY);
         _mm256_store_ps(&particles->velX[i], velX);
         _mm256_store_ps(&particles->velY[i], velY);
-    }
-    return 0;
-}
-
-void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos)
-{
-    const int threadCount = MAX_THREADS;
-    HANDLE threads[threadCount];
-    ThreadArgs args[threadCount];
-
-    int particlesPerThread = PARTICLE_COUNT / threadCount;
-
-    for (int i = 0; i < threadCount; i++)
-    {
-        args[i].start = i * particlesPerThread;
-        args[i].end = (i + 1) * particlesPerThread;
-        args[i].particles = particles;
-        args[i].mousePos = mousePos;
-
-        threads[i] = CreateThread(NULL, 0, UpdateParticlesSubset, &args[i], 0, NULL);
-        if (threads[i] == NULL)
-        {
-            // Handle thread creation error
-        }
-    }
-
-    for (int i = 0; i < threadCount; i++)
-    {
-        WaitForSingleObject(threads[i], INFINITE);
-        CloseHandle(threads[i]);
-    }
-}
-
-void FreeParticles(Particles *particles)
-{
-    _aligned_free(particles->posX);
-    _aligned_free(particles->posY);
-    _aligned_free(particles->velX);
-    _aligned_free(particles->velY);
-}
-
-void UpdateOffScreenBufferWithParticles(Particles *particles, Texture2D *offScreenBuffer)
-{
-    Color *pixels = (Color *)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(Color));
-
-    // Initialize pixel data
-    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++)
-    {
-        pixels[i] = BLANK;
-    }
-
-    // Set particle pixels
-    for (int i = 0; i < PARTICLE_COUNT; i++)
-    {
-        int x = (int)particles->posX[i];
-        int y = (int)particles->posY[i];
-
-        if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT)
-        {
-            pixels[y * SCREEN_WIDTH + x] = PARTICLE_COLOR;
-        }
-    }
-
-    // Update the texture with new pixel data
-    UpdateTexture(*offScreenBuffer, pixels);
-
-    free(pixels);
-}
-
-void HandleKeys(void)
-{
-    if (IsKeyPressed(KEY_UP))
-    {
-        globalAttractionStrength += 0.0005f;
-        TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
-    }
-    if (IsKeyPressed(KEY_DOWN))
-    {
-        globalAttractionStrength -= 0.0005f;
-        TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
-    }
-    if (IsKeyPressed(KEY_RIGHT))
-    {
-        globalFriction += 0.0005f;
-        TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
-    }
-    if (IsKeyPressed(KEY_LEFT))
-    {
-        globalFriction -= 0.0005f;
-        TraceLog(LOG_INFO, "Attraction: %.4f, Friction: %.4f", globalAttractionStrength, globalFriction);
     }
 }

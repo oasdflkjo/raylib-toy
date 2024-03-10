@@ -1,4 +1,6 @@
-// workaround for naming conflicts, still prefer c tough :)
+/* ========================================================================= */
+/*                             Header Includes                               */
+/* ========================================================================= */
 #include "raylib.h"
 #define Rectangle _Rectangle
 #define CloseWindow _CloseWindow
@@ -7,14 +9,17 @@
 #undef Rectangle
 #undef CloseWindow
 #undef ShowCursor
+// workaround for naming conflicts
 
-#include <immintrin.h> // AVX2 and earlier intrinsics
+#include <immintrin.h>
 #include <assert.h>
-#include <time.h>
 
-#define PARTICLE_COUNT 1440000 // 360000 // 1440000 // TODO: crashes if used for example 130000
-#define PARTICLE_COLOR \
-    (Color) { 0, 0, 0, 255 }
+#include "../include/threadpool.h"
+
+/* ========================================================================= */
+/*                            Defines                                        */
+/* ========================================================================= */
+#define PARTICLE_COUNT 1440000 // 360000 // 1440000 // 2880000 TODO: crashes if used for example 
 #define MAX_THREADS 12
 #define ALIGNMENT 16
 #define TARGET_FPS 160
@@ -22,7 +27,11 @@
 #define FRICTION 0.999f
 #define SCREEN_WIDTH 3440
 #define SCREEN_HEIGHT 1440
-#define PARTICLES_PER_CHUNK 80000
+
+/* ========================================================================= */
+/*                            Global Variables                               */
+/* ========================================================================= */
+static TP_CALLBACK_ENVIRON CallBackEnviron;
 
 typedef struct Particles
 {
@@ -40,144 +49,74 @@ typedef struct
     Vector2 mousePos;
 } ThreadArgs;
 
-
+/* ========================================================================= */
+/*                           Function Prototypes                             */
+/* ========================================================================= */
 Particles CreateParticles(int count, int screenWidth, int screenHeight);
-void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos, PTP_POOL pool, PTP_CALLBACK_ENVIRON *pCallBackEnviron);
-
+void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos);
 void FreeParticles(Particles *particles);
-
-void UpdateOffScreenBufferWithParticles(Particles *particles, Texture2D *offScreenBuffer, Color *pixels);
-/**
- * @brief Callback function for updating particle positions using AVX2 instructions.
- *
- * This function is designed to be used with a thread pool, where each invocation
- * updates a subset of the total particles based on AVX2 SIMD instructions for
- * improved performance. It calculates new positions and velocities for each particle
- * in the subset by applying attraction and friction forces, considering the current
- * mouse position as a point of attraction.
- *
- * @param Instance Unused parameter provided by the thread pool, required for callback signature compatibility.
- * @param Context Pointer to a user-defined `ThreadArgs` structure containing the subset of particles to update,
- * the overall particle data, and the current mouse position.
- * @param Work Unused parameter provided by the thread pool, required for callback signature compatibility.
- *
- * @note The `Instance` and `Work` parameters are part of the function signature required by the thread pool API
- * but are not used within this function. They are explicitly cast to void to avoid compiler warnings.
- *
- * The function divides the update process into segments processed in parallel, leveraging the
- * AVX2 instruction set for efficient computation. It directly modifies the positions and velocities
- * of particles in the provided `ThreadArgs` structure.
- */
+void UpdateOffScreenBufferWithParticles(Particles *particles, Color *pixels);
 void CALLBACK UpdateParticlesWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work);
 
-int main()
+/* ========================================================================= */
+/*                            Main                                           */
+/* ========================================================================= */
+int main(void)
 {
-    assert(PARTICLE_COUNT % 4 == 0 && "Particle count must be a multiple of 4 for SIMD operations");
-
+    assert(PARTICLE_COUNT % 8 == 0 && "Particle count must be a multiple of 4 for SIMD operations");
+   
     // Initialize the screen width and height to the monitor's size
     int screenWidth = GetMonitorWidth(0);
     int screenHeight = GetMonitorHeight(0);
-
-    // Allocate the pixels buffer
-    Color *pixels = (Color *)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(Color));
-    if (!pixels)
-    {
-        // Handle allocation failure
-        return -1;
-    }
-
-    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++)
-    {
-        pixels[i] = BLANK;
-    }
-
-    // Initialize the Raylib window
-    InitWindow(screenWidth, screenHeight, "Particle Effect in C");
-
-    // Hide the window's border to simulate fullscreen windowed mode
-    // Note: As of my last update, you might need to check if Raylib has introduced a direct function or flag for this
-    ToggleFullscreen(); // This can make it fullscreen, but it might not be exactly what you're looking for in "windowed fullscreen"
+    InitWindow(screenWidth, screenHeight, "Particle System");
     SetWindowState(FLAG_FULLSCREEN_MODE);
-    // SetWindowState(FLAG_WINDOW_UNDECORATED); // Hides the window border
-    // SetWindowState(FLAG_WINDOW_RESIZABLE);   // Optional: Make the window resizable
-    //  Set the window position to zero to ensure it fills the entire screen
-    SetWindowPosition(0, 0);
-
-    Image particleImage = GenImageColor(SCREEN_WIDTH, SCREEN_HEIGHT, BLANK);
-    Texture2D offScreenBuffer = LoadTextureFromImage(particleImage);
-
-    UnloadImage(particleImage); // Unload the image once texture is created
-
-    Particles particles = CreateParticles(PARTICLE_COUNT, SCREEN_WIDTH, SCREEN_HEIGHT);
-
     SetTargetFPS(TARGET_FPS);
+    RenderTexture2D mainBuffer = LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT);
+    Color *pixels = (Color *)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(Color));
 
-    // Initialize the thread pool environment
-    TP_CALLBACK_ENVIRON CallBackEnviron;
-    PTP_POOL pool = NULL;
-    InitializeThreadpoolEnvironment(&CallBackEnviron);
-
-    pool = CreateThreadpool(NULL);
-    if (!pool) {
-        // Handle error
-        return -1;
-    }
-    SetThreadpoolCallbackPool(&CallBackEnviron, pool);
+    // Initialize your particle system here
+    Particles particles = CreateParticles(PARTICLE_COUNT, SCREEN_WIDTH, SCREEN_HEIGHT);
 
     while (!WindowShouldClose())
     {
         Vector2 mousePos = GetMousePosition();
-
-        int totalChunks = (PARTICLE_COUNT + PARTICLES_PER_CHUNK - 1) / PARTICLES_PER_CHUNK;
-
-        for (int chunk = 0; chunk < totalChunks; chunk++)
-        {
-            int start = chunk * PARTICLES_PER_CHUNK;
-            int end = start + PARTICLES_PER_CHUNK;
-            if (end > PARTICLE_COUNT)
-            {
-                end = PARTICLE_COUNT;
-            }
-
-            // Prepare arguments for this chunk
-            ThreadArgs *args = malloc(sizeof(ThreadArgs)); // Ensure to free this in your callback or after waiting for tasks
-            args->start = start;
-            args->end = end;
-            args->particles = &particles;
-            args->mousePos = mousePos;
-
-            PTP_WORK work = CreateThreadpoolWork(UpdateParticlesWorkCallback, args, &CallBackEnviron);
-            if (!work)
-            {
-                // Handle error
-                free(args);
-            }
-            else
-            {
-                SubmitThreadpoolWork(work);
-            }
-        }
-
-        UpdateOffScreenBufferWithParticles(&particles, &offScreenBuffer, pixels);
-
+        UpdateParticlesMultithreaded(&particles, mousePos);
+        UpdateOffScreenBufferWithParticles(&particles, pixels);
+        UpdateTexture(mainBuffer.texture, pixels);
         BeginDrawing();
-        ClearBackground(RAYWHITE);
-        DrawTexture(offScreenBuffer, 0, 0, WHITE);
-        DrawFPS(10, 10);
+        ClearBackground(GRAY);
+        // Draw the texture of the off-screen buffer to the screen.
+        DrawTexture(mainBuffer.texture, 0, 0, WHITE);
+        DrawFPS(20, 20);
         EndDrawing();
     }
 
-    // At the end of your program
-    if (pixels)
-    {
-        free(pixels);
-        pixels = NULL; // Prevent use-after-free errors
-    }
-    CloseThreadpool(pool);
-    DestroyThreadpoolEnvironment(&CallBackEnviron);
     FreeParticles(&particles);
     CloseWindow();
+
     return 0;
+}
+
+/* ========================================================================= */
+/*                            Private functions                              */
+/* ========================================================================= */
+inline void UpdateOffScreenBufferWithParticles(Particles *particles, Color *pixels)
+{
+    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++)
+    {
+        pixels[i] = GRAY;
+    }
+
+    for (int i = 0; i < PARTICLE_COUNT; i++)
+    {
+        int x = (int)particles->posX[i];
+        int y = (int)particles->posY[i];
+
+        if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT)
+        {
+            pixels[y * SCREEN_WIDTH + x] = BLACK;
+        }
+    }
 }
 
 Particles CreateParticles(int count, int screenWidth, int screenHeight)
@@ -199,69 +138,12 @@ Particles CreateParticles(int count, int screenWidth, int screenHeight)
     return p;
 }
 
-void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos, PTP_POOL pool, PTP_CALLBACK_ENVIRON *pCallBackEnviron) {
-    (void)pool;
-    const int threadCount = MAX_THREADS;
-    PTP_WORK workItems[threadCount];
-    ThreadArgs args[threadCount];
-    int particlesPerThread = PARTICLE_COUNT / threadCount;
-
-    for (int i = 0; i < threadCount; i++) {
-        args[i].start = i * particlesPerThread;
-        args[i].end = (i + 1) * particlesPerThread;
-        args[i].particles = particles;
-        args[i].mousePos = mousePos;
-
-        // Create a work item for the thread pool
-        workItems[i] = CreateThreadpoolWork(UpdateParticlesWorkCallback, &args[i], pCallBackEnviron);
-        if (workItems[i] == NULL) {
-            // Handle error
-        }
-
-        // Submit the work item
-        SubmitThreadpoolWork(workItems[i]);
-    }
-
-    // Wait for all work items to complete
-    for (int i = 0; i < threadCount; i++) {
-        WaitForThreadpoolWorkCallbacks(workItems[i], FALSE);
-        CloseThreadpoolWork(workItems[i]);
-    }
-}
-
-
 void FreeParticles(Particles *particles)
 {
     _aligned_free(particles->posX);
     _aligned_free(particles->posY);
     _aligned_free(particles->velX);
     _aligned_free(particles->velY);
-}
-
-void UpdateOffScreenBufferWithParticles(Particles *particles, Texture2D *offScreenBuffer, Color *pixels)
-{
-    // Assuming 'pixels' is accessible here, either as a global or passed as an argument
-
-    // Reset pixel data to BLANK at the start of each frame
-    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++)
-    {
-        pixels[i] = BLANK;
-    }
-
-    // Set particle pixels
-    for (int i = 0; i < PARTICLE_COUNT; i++)
-    {
-        int x = (int)particles->posX[i];
-        int y = (int)particles->posY[i];
-
-        if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT)
-        {
-            pixels[y * SCREEN_WIDTH + x] = PARTICLE_COLOR;
-        }
-    }
-
-    // Update the texture with the pixels data
-    UpdateTexture(*offScreenBuffer, pixels);
 }
 
 void CALLBACK UpdateParticlesWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
@@ -314,5 +196,30 @@ void CALLBACK UpdateParticlesWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID 
         _mm256_store_ps(&particles->posY[i], posY);
         _mm256_store_ps(&particles->velX[i], velX);
         _mm256_store_ps(&particles->velY[i], velY);
+    }
+}
+
+void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos)
+{
+    const int threadCount = MAX_THREADS;
+    PTP_WORK workItems[threadCount];
+    ThreadArgs args[threadCount];
+    int particlesPerThread = PARTICLE_COUNT / threadCount;
+
+    for (int i = 0; i < threadCount; i++)
+    {
+        args[i].start = i * particlesPerThread;
+        args[i].end = (i + 1) * particlesPerThread;
+        args[i].particles = particles;
+        args[i].mousePos = mousePos;
+
+        workItems[i] = CreateThreadpoolWork(UpdateParticlesWorkCallback, &args[i], &CallBackEnviron);
+        SubmitThreadpoolWork(workItems[i]);
+    }
+    // Wait for all work items to complete
+    for (int i = 0; i < threadCount; i++)
+    {
+        WaitForThreadpoolWorkCallbacks(workItems[i], FALSE);
+        CloseThreadpoolWork(workItems[i]);
     }
 }

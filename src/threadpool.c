@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 // Initialize the thread pool
-SimpleThreadPool* SimpleThreadPool_Init() {
+SimpleThreadPool* SimpleThreadPool_Init(DWORD minThreads, DWORD maxThreads) {
     SimpleThreadPool* tp = (SimpleThreadPool*)malloc(sizeof(SimpleThreadPool));
     if (!tp) return NULL;
 
@@ -14,6 +14,16 @@ SimpleThreadPool* SimpleThreadPool_Init() {
 
     InitializeThreadpoolEnvironment(&tp->callBackEnviron);
     SetThreadpoolCallbackPool(&tp->callBackEnviron, tp->pool);
+
+    // Set the minimum and maximum number of threads
+    if (!SetThreadpoolThreadMinimum(tp->pool, minThreads)) {
+        // Cleanup if unable to set minimum thread count
+        CloseThreadpool(tp->pool);
+        DestroyThreadpoolEnvironment(&tp->callBackEnviron);
+        free(tp);
+        return NULL;
+    }
+    SetThreadpoolThreadMaximum(tp->pool, maxThreads);
 
     return tp;
 }

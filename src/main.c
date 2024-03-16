@@ -1,6 +1,7 @@
 // TODO: wrap buffers to a struct to possibly increase data locality for simd operations
 // TODO: fps text is jumping around, fix text to be in the same position
-// TODO: wait for the first frame to be drawn before starting the loop
+// TODO: wait for the first
+// TODO: ramp up the constnats to have a smoother start animation
 /* ========================================================================= */
 /*                             Header Includes                               */
 /* ========================================================================= */
@@ -26,18 +27,18 @@
 /* ========================================================================= */
 /*                            Defines                                        */
 /* ========================================================================= */
-#define PARTICLE_COUNT 5760000 // 360000 // 720000 // 1440000 // 2880000 // 5760000 
+#define PARTICLE_COUNT 8000 // 360000 // 720000 // 1440000 // 2880000 // 5760000 // 4953600
 #define MAX_THREADS 12
 #define TARGET_FPS 160
-#define ATTRACTION_STRENGHT 0.0200f
-#define FRICTION 0.9999f
+#define ATTRACTION_STRENGHT 0.2000f // 0.2000f
+#define FRICTION 0.999f // 0.999f
 #define SCREEN_WIDTH 3440
 #define SCREEN_HEIGHT 1440
 
 /* ========================================================================= */
 /*                            Global Variables                               */
 /* ========================================================================= */
-// 
+//
 static TP_CALLBACK_ENVIRON CallBackEnviron;
 
 typedef struct Particles
@@ -174,21 +175,6 @@ void UpdateBufferWithParticles(BOOL *buffer, Particles *particles, int start, in
 void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work);
 
 /**
- * @brief Combines two buffers using SIMD instructions.
- *
- * This function combines two buffers using SIMD instructions to efficiently process
- * multiple elements at once. It utilizes AVX2 instructions for SIMD (Single Instruction, Multiple Data)
- * processing to efficiently combine two buffers into a final buffer. The function processes the buffers
- * in chunks of 8 elements at a time, which is the optimal size for AVX2 processing.
- *
- * @param bufferA A pointer to the first buffer to combine.
- * @param bufferB A pointer to the second buffer to combine.
- * @param finalBuffer A pointer to the final buffer to store the combined result.
- * @param bufferSize The number of elements in the buffers.
- */
-void CombineBuffersSIMD(int *bufferA, int *bufferB, int *finalBuffer, int bufferSize);
-
-/**
  * @brief Sets the color of a buffer using SIMD instructions.
  *
  * This function sets the color of a buffer using SIMD instructions to efficiently process
@@ -203,18 +189,42 @@ void CombineBuffersSIMD(int *bufferA, int *bufferB, int *finalBuffer, int buffer
 static inline uint32_t PackColor(Color color);
 
 /**
- * @brief Converts a boolean buffer to a pixel buffer using SIMD instructions.
+ * Allocates memory for a 2D boolean buffer with alignment suitable for SIMD operations.
  *
- * This function converts a boolean buffer to a pixel buffer using SIMD instructions to efficiently process
- * multiple elements at once. It utilizes AVX2 instructions for SIMD (Single Instruction, Multiple Data)
- * processing to efficiently convert a boolean buffer to a pixel buffer. The function processes the buffers
- * in chunks of 8 elements at a time, which is the optimal size for AVX2 processing.
- *
- * @param finalBuffer A pointer to the boolean buffer to convert.
- * @param pixels A pointer to the pixel buffer to store the converted result.
- * @param bufferSize The number of elements in the buffers.
+ * @param width The width of the buffer.
+ * @param height The height of the buffer.
+ * @return A pointer to the allocated buffer or NULL if allocation fails.
  */
-void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSize);
+BOOL *AllocateAlignedBoolBuffer(int width, int height)
+{
+    // Calculate the total size needed for the buffer.
+    size_t totalSize = width * height * sizeof(BOOL);
+
+    // Allocate the memory with specified alignment.
+    BOOL *buffer = (BOOL *)_aligned_malloc(totalSize, 32);
+
+    // Optionally, you can initialize the buffer to false (0) here.
+    if (buffer)
+    {
+        memset(buffer, 0, totalSize);
+    }
+
+    return buffer;
+}
+
+/**
+ * @brief Sets the color of a buffer using SIMD instructions.
+ *
+ * This function sets the color of a buffer using SIMD instructions to efficiently process
+ * multiple pixels at once. It utilizes AVX2 instructions for SIMD (Single Instruction, Multiple Data)
+ * processing to efficiently set the color of a buffer to a specified value. The function processes
+ * the buffer in chunks of 8 pixels at a time, which is the optimal size for AVX2 processing.
+ *
+ * @param pixels A pointer to the buffer to set the color of.
+ * @param count The number of pixels in the buffer.
+ * @param color The color to set the buffer to.
+ */
+void CombineBuffersAndConvertToPixelsSIMD(const BOOL *bufferA, const BOOL *bufferB, Color *pixels, int bufferSize);
 
 /* ========================================================================= */
 /*                            Main                                           */
@@ -233,25 +243,25 @@ int main(void)
     InitWindow(screenWidth, screenHeight, "Particle System");
     SetWindowState(FLAG_FULLSCREEN_MODE);
     SetTargetFPS(TARGET_FPS);
-    InitAudioDevice(); // Initialize audio device
+
+    // Initialize audio device
+    InitAudioDevice(); 
     Music music = LoadMusicStream("midnight-forest-184304.mp3");
     PlayMusicStream(music);
+
+    HideCursor(); // Hide the system cursor
+    // Set the initial position of the mouse to the center of the screen
     int centerX = SCREEN_WIDTH / 2;
     int centerY = SCREEN_HEIGHT / 2;
-    HideCursor(); // Hide the system cursor
     SetMousePosition(centerX, centerY);
-    Color redDotColor = RED;
-    float redDotRadius = 5.0f; // Size of the red dot
+
+    // Load the main render texture and allocate memory for the pixel buffer
     RenderTexture2D mainBuffer = LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT);
     Color *pixels = (Color *)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(Color));
-    // Allocate aligned memory for the buffers
-    BOOL *bufferA = (BOOL *)_aligned_malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL), 32);
-    BOOL *bufferB = (BOOL *)_aligned_malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL), 32);
-    BOOL *finalBuffer = (BOOL *)_aligned_malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL), 32);
 
-    memset(bufferA, 0, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL));
-    memset(bufferB, 0, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL));
-    memset(finalBuffer, 0, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL));
+    // Allocate aligned memory for the buffers
+    BOOL *bufferA = AllocateAlignedBoolBuffer(SCREEN_WIDTH, SCREEN_HEIGHT);
+    BOOL *bufferB = AllocateAlignedBoolBuffer(SCREEN_WIDTH, SCREEN_HEIGHT);
 
     Particles particles = CreateParticles(PARTICLE_COUNT, SCREEN_WIDTH, SCREEN_HEIGHT);
 
@@ -300,8 +310,6 @@ int main(void)
 
         // Buffers combination and conversion
         double bufferStartTime = GetTime();
-        CombineBuffersSIMD(bufferA, bufferB, finalBuffer, SCREEN_WIDTH * SCREEN_HEIGHT);
-        ConvertBoolToPixelsSIMD(finalBuffer, pixels, SCREEN_WIDTH * SCREEN_HEIGHT);
         TraceLog(LOG_INFO, "Buffers combination and conversion took %f seconds", GetTime() - bufferStartTime);
 
         // Texture update and drawing
@@ -332,15 +340,13 @@ int main(void)
         CloseThreadpoolWork(workItemA);
         CloseThreadpoolWork(workItemB);
 
-        // combine buffers and convert to pixels
-        CombineBuffersSIMD(bufferA, bufferB, finalBuffer, SCREEN_WIDTH * SCREEN_HEIGHT);
-        ConvertBoolToPixelsSIMD(finalBuffer, pixels, SCREEN_WIDTH * SCREEN_HEIGHT);
+        CombineBuffersAndConvertToPixelsSIMD(bufferA, bufferB, pixels, SCREEN_WIDTH * SCREEN_HEIGHT);
 
         // update texture and draw
         UpdateTexture(mainBuffer.texture, pixels);
         BeginDrawing();
         DrawTexture(mainBuffer.texture, 0, 0, WHITE);
-        DrawCircleV(mousePos, redDotRadius, redDotColor);
+        DrawCircleV(mousePos, 5.0f, RED);
         DrawFPS(10, 10);
         EndDrawing();
     }
@@ -560,40 +566,35 @@ void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Con
                               updateContext->bufferWidth, updateContext->bufferHeight);
 }
 
-void CombineBuffersSIMD(int *bufferA, int *bufferB, int *finalBuffer, int bufferSize)
-{
-    // Process 8 integers at a time with AVX2
-    for (int i = 0; i <= bufferSize - 8; i += 8)
-    {
-        __m256i vA = _mm256_load_si256((__m256i *)&bufferA[i]); // Load 8 integers from bufferA
-        __m256i vB = _mm256_load_si256((__m256i *)&bufferB[i]); // Load 8 integers from bufferB
-        // compute with OR
-        __m256i a = _mm256_or_si256(vA, vB); // OR
-        //__m256i a = _mm256_xor_si256(vA, vB);    // XOR
-        //__m256i a = _mm256_and_si256(vA, vB);    // AND
-        _mm256_store_si256((__m256i *)&finalBuffer[i], a); // Store the result
-    }
-}
-
 static inline uint32_t PackColor(Color color)
 {
     return color.r | (color.g << 8) | (color.b << 16) | (color.a << 24);
 }
 
-void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSize)
-{
-    // Define colors in packed format
-    uint32_t packedBlack = PackColor((Color){0, 0, 0, 255});
-    uint32_t packedGray = PackColor((Color){130, 130, 130, 255});
+void CombineBuffersAndConvertToPixelsSIMD(const BOOL *bufferA, const BOOL *bufferB, Color *pixels, int bufferSize) {
+    // Define colors in packed format for SIMD
+    uint32_t packedTrueColor = PackColor((Color){0, 0, 0, 255}); // Black
+    uint32_t packedFalseColor = PackColor((Color){130, 130, 130, 255}); // Gray
 
-    __m256i vBlack = _mm256_set1_epi32(packedBlack);
-    __m256i vGray = _mm256_set1_epi32(packedGray);
+    __m256i vTrueColor = _mm256_set1_epi32(packedTrueColor);
+    __m256i vFalseColor = _mm256_set1_epi32(packedFalseColor);
 
-    for (int i = 0; i <= bufferSize - 8; i += 8)
-    {
-        __m256i mask = _mm256_loadu_si256((__m256i *)&finalBuffer[i]);    // Load 8 bools (as ints)
-        __m256i vMask = _mm256_cmpeq_epi32(mask, _mm256_setzero_si256()); // Compare mask elements to 0
-        __m256i vResult = _mm256_blendv_epi8(vBlack, vGray, vMask);       // Blend pixels based on mask
-        _mm256_storeu_si256((__m256i *)&pixels[i], vResult);              // Store the result
+    for (int i = 0; i <= bufferSize - 8; i += 8) {
+        __m256i vA = _mm256_load_si256((const __m256i *)&bufferA[i]); // Load 8 elements from bufferA
+        __m256i vB = _mm256_load_si256((const __m256i *)&bufferB[i]); // Load 8 elements from bufferB
+
+        // Combine buffers using OR (or any other logical operation you prefer)
+        __m256i combined = _mm256_or_si256(vA, vB);
+        //__m256i combined = _mm256_xor_si256(vA, vB); 
+
+        // Generate a mask based on the combined result to select between trueColor and falseColor
+        // Assuming non-zero values in combined mean true, and zero means false
+        __m256i mask = _mm256_cmpeq_epi32(combined, _mm256_setzero_si256()); // Elements are 0xFFFFFFFF if false, 0x0 if true
+        
+        // Blend pixels based on the mask: true values select from vTrueColor, false values from vFalseColor
+        __m256i result = _mm256_blendv_epi8(vTrueColor, vFalseColor, mask);
+
+        // Store the result directly into the pixels array
+        _mm256_storeu_si256((__m256i *)&pixels[i], result);
     }
 }

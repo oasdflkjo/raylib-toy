@@ -1,12 +1,15 @@
 # Raylib-Toy
 
-A simple program to generate particle effects, featuring an windows multithreading and SIMD. This project utilizes [Raylib](https://www.raylib.com/), a simple and easy-to-use library to enjoy videogames programming.
+This particle simulation leverages a sophisticated architecture designed for high performance and real-time rendering of thousands of particles. At its core, the system utilizes a Struct of Arrays (SoA) for particle data management, enhancing data locality and SIMD (Single Instruction, Multiple Data) processing efficiency. Multithreading via the Windows Thread Pool API allows the workload to be distributed across multiple cores, ensuring that each thread updates a segment of particles concurrently, which maximizes CPU utilization and minimizes processing time.
 
-- Simulating 720,000 moving particles at 160fps
-- Multithreading
-- SIMD
+Key highlights of the simulation architecture include:
 
-[![youtube link](https://img.youtube.com/vi/_Yh6UAYJCzw/0.jpg)](https://www.youtube.com/watch?v=_Yh6UAYJCzw)
+- Efficient Particle Data Structure: Utilizes SoA to improve cache efficiency and SIMD compatibility, storing particle positions and velocities in separate arrays.
+- SIMD Optimizations: Employs AVX2 instructions for vectorized operations, allowing multiple particle updates in parallel, significantly speeding up computations.
+- Multithreaded Updates: Leverages a thread pool for distributing particle updates across multiple threads, enhancing performance on multi-core systems.
+- Rendering with Raylib: Utilizes Raylib for rendering, employing a double-buffering technique to ensure smooth animations.
+- Resource Management: Ensures aligned memory allocations for efficient SIMD processing.
+- By integrating these approaches, the simulation achieves fluid motion and dynamic particle interactions, targeting high frame rates and delivering a visually compelling experience.
 
 ## Getting Started
 

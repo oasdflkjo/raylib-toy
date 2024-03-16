@@ -12,7 +12,6 @@ Key highlights of the simulation architecture include:
 
 [![youtube](https://img.youtube.com/vi/Wg_yjpatF90/0.jpg)](https://www.youtube.com/watch?v=Wg_yjpatF90)
 
-
 ## Getting Started
 
 These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. Have fun :)
@@ -51,6 +50,30 @@ After compilation, run the program:
 ./main.exe
 ```
 
+### Flowchart of the program
+
+```mermaid
+graph TD
+    A(Start) --> B[Initialize Thread Pool]
+    B --> C[Setup Window and Audio]
+    C --> D[Hide Cursor & Set Mouse Position]
+    D --> E[Load Render Texture and Allocate Pixel Buffer]
+    E --> F[Initialize Particles]
+    F --> G[Allocate Boolean Buffers]
+    G --> H[Main Loop]
+    H -->|Update| I[Update Music Stream]
+    I --> J[Update Particles Multithreadedly]
+    J --> K[Update Boolean Buffers Multithreadedly]
+    K --> L[Combine Buffers & Update Texture]
+    L --> M[Render & Draw FPS]
+    M --> N{Window Should Close?}
+    N -->|Yes| O[Cleanup Resources]
+    N -->|No| I
+    O --> P[Unload Music & Close Audio]
+    P --> Q[Free Particles & Buffers]
+    Q --> R[Close Window & Destroy Thread Pool]
+    R --> S(End)
+```
 ### License
 
 This project is licensed under the MIT License

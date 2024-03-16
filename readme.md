@@ -10,6 +10,9 @@ Key highlights of the simulation architecture include:
 - Resource Management: Ensures aligned memory allocations for efficient SIMD processing.
 - By integrating these approaches, the simulation achieves fluid motion and dynamic particle interactions, targeting high frame rates and delivering a visually compelling experience.
 
+[![youtube](https://img.youtube.com/vi/Wg_yjpatF90/0.jpg)](https://www.youtube.com/watch?v=Wg_yjpatF90)
+
+
 ## Getting Started
 
 These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. Have fun :)

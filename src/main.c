@@ -1,3 +1,6 @@
+// TODO: wrap buffers to a struct to possibly increase data locality for simd operations
+// TODO: fps text is jumping around, fix text to be in the same position
+// TODO: wait for the first frame to be drawn before starting the loop
 /* ========================================================================= */
 /*                             Header Includes                               */
 /* ========================================================================= */
@@ -19,23 +22,22 @@
 #include <stdbool.h>
 #include <math.h>
 #include <stdio.h>
+
 /* ========================================================================= */
 /*                            Defines                                        */
 /* ========================================================================= */
-#define PARTICLE_COUNT 5760000 // 360000 // 720000 // 1440000 // 2880000 // 5760000
+#define PARTICLE_COUNT 5760000 // 360000 // 720000 // 1440000 // 2880000 // 5760000 
 #define MAX_THREADS 12
-#define ALIGNMENT 32
 #define TARGET_FPS 160
-#define ATTRACTION_STRENGHT 0.2000f
-#define FRICTION 0.999f
+#define ATTRACTION_STRENGHT 0.0200f
+#define FRICTION 0.9999f
 #define SCREEN_WIDTH 3440
 #define SCREEN_HEIGHT 1440
-#define MY_BLACK 0x000000FF
-#define MY_GRAY 0x808080FF
 
 /* ========================================================================= */
 /*                            Global Variables                               */
 /* ========================================================================= */
+// 
 static TP_CALLBACK_ENVIRON CallBackEnviron;
 
 typedef struct Particles
@@ -70,37 +72,37 @@ typedef struct
 /* ========================================================================= */
 
 /**
- * @brief Creates a Particles structure and initializes the particle positions and velocities.
+ * @brief Creates a new set of particles with the specified count and screen dimensions.
  *
  * @param count The number of particles to create.
- * @param screenWidth The width of the screen to use as the maximum x position for the particles.
- * @param screenHeight The height of the screen to use as the maximum y position for the particles.
- * @return Particles The Particles structure containing the particle positions and velocities.
+ * @param screenWidth The width of the screen to place the particles on.
+ * @param screenHeight The height of the screen to place the particles on.
+ *
+ * @return A Particles structure containing the particle positions and velocities.
  */
-Particles CreateParticlesSIMD(int count, int screenWidth, int screenHeight);
+Particles CreateParticles(int count, int screenWidth, int screenHeight);
 
 /**
  * @brief Updates the positions and velocities of the particles in a multithreaded environment.
  *
- * @param particles A pointer to the Particles structure containing the particle positions and velocities.
- * @param mousePos The current mouse position to use as an attraction point for the particles.
+ * This function updates the positions and velocities of the particles in a multithreaded environment
+ * using the Windows Thread Pool API. It creates a thread pool with a maximum number of threads
+ * and divides the work of updating the particles among the threads. Each thread updates a subset
+ * of the particles based on their current positions, velocities, and the influence of an external force
+ * (e.g., attraction to a point, simulated by mouse position). The calculations include computing the
+ * distance to the attraction point, applying an attraction force, and adjusting for friction.
+ *
+ * @param particles A pointer to the Particles structure containing the particle positions.
+ * @param mousePos The current position of the mouse, used to simulate an external force.
  */
 void UpdateParticlesMultithreaded(Particles *particles, Vector2 mousePos);
 
 /**
- * @brief Frees the memory allocated for the Particles structure.
+ * @brief Frees the memory allocated for the particles.
  *
  * @param particles A pointer to the Particles structure to free.
  */
 void FreeParticles(Particles *particles);
-
-/**
- * @brief Updates the off-screen buffer with the current particle positions.
- *
- * @param particles A pointer to the Particles structure containing the particle positions.
- * @param pixels A pointer to the off-screen buffer to update with the particle positions.
- */
-inline void UpdateOffScreenBufferWithParticles(Particles *particles, Color *pixels);
 
 /**
  * @brief Callback function for updating particle positions and velocities in a multithreaded environment.
@@ -139,108 +141,80 @@ void CALLBACK UpdateParticlesWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID 
  */
 void InitializeThreadPoolWithMaxThreads(PTP_POOL *pool, PTP_CALLBACK_ENVIRON callBackEnviron, DWORD maxThreads);
 
-void UpdateBufferWithParticles(BOOL *buffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight)
-{
-    // Initialize buffer to false, representing an empty or "black" state
-    for (int i = 0; i < bufferWidth * bufferHeight; i++)
-    {
-        buffer[i] = false; // No particle present at this position
-    }
+/**
+ * @brief Updates a boolean buffer with the positions of particles.
+ *
+ * This function updates a boolean buffer with the positions of particles. It sets the buffer
+ * to true at the positions of the particles and false at all other positions. The function
+ * processes the particles in a specified range and updates the buffer based on their positions.
+ *
+ * @param buffer A pointer to the boolean buffer to update.
+ * @param particles A pointer to the Particles structure containing the particle positions.
+ * @param start The starting index of the particles to update.
+ * @param end The ending index of the particles to update.
+ * @param bufferWidth The width of the buffer.
+ * @param bufferHeight The height of the buffer.
+ */
+void UpdateBufferWithParticles(BOOL *buffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight);
 
-    // Update buffer with particles
-    for (int i = start; i < end; i++)
-    {
-        int x = (int)particles->posX[i];
-        int y = (int)particles->posY[i];
+/**
+ * @brief Callback function for updating a boolean buffer with particle positions in a multithreaded environment.
+ *
+ * This function is called by a thread pool work item to update a boolean buffer with the positions of particles.
+ * It sets the buffer to true at the positions of the particles and false at all other positions. The function
+ * processes the particles in a specified range and updates the buffer based on their positions. It is designed
+ * to be used with the Windows Thread Pool API and expects the Context parameter to be of type (UpdateContext*).
+ *
+ * @param Instance Unused. A pointer to a TP_CALLBACK_INSTANCE structure that defines the callback instance.
+ * @param Context A pointer to user-defined data passed to the function. This should be a pointer to an UpdateContext
+ *                structure containing information about the boolean buffer to update, the range of particles this
+ *                callback is responsible for, and the dimensions of the buffer.
+ * @param Work Unused. A pointer to a TP_WORK structure that represents the work item that generated the callback.
+ */
+void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work);
 
-        // Ensure the particle is within the bounds of the buffer
-        if (x >= 0 && x < bufferWidth && y >= 0 && y < bufferHeight)
-        {
-            int index = y * bufferWidth + x;
-            buffer[index] = true; // Particle present at this position
-        }
-    }
-}
+/**
+ * @brief Combines two buffers using SIMD instructions.
+ *
+ * This function combines two buffers using SIMD instructions to efficiently process
+ * multiple elements at once. It utilizes AVX2 instructions for SIMD (Single Instruction, Multiple Data)
+ * processing to efficiently combine two buffers into a final buffer. The function processes the buffers
+ * in chunks of 8 elements at a time, which is the optimal size for AVX2 processing.
+ *
+ * @param bufferA A pointer to the first buffer to combine.
+ * @param bufferB A pointer to the second buffer to combine.
+ * @param finalBuffer A pointer to the final buffer to store the combined result.
+ * @param bufferSize The number of elements in the buffers.
+ */
+void CombineBuffersSIMD(int *bufferA, int *bufferB, int *finalBuffer, int bufferSize);
 
-void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
-{
-    // Explicitly mark unused parameters to avoid compiler warnings
-    (void)Instance;
-    (void)Work;
+/**
+ * @brief Sets the color of a buffer using SIMD instructions.
+ *
+ * This function sets the color of a buffer using SIMD instructions to efficiently process
+ * multiple pixels at once. It utilizes AVX2 instructions for SIMD (Single Instruction, Multiple Data)
+ * processing to efficiently set the color of a buffer to a specified value. The function processes
+ * the buffer in chunks of 8 pixels at a time, which is the optimal size for AVX2 processing.
+ *
+ * @param pixels A pointer to the buffer to set the color of.
+ * @param count The number of pixels in the buffer.
+ * @param color The color to set the buffer to.
+ */
+static inline uint32_t PackColor(Color color);
 
-    // Convert context to our structure that holds necessary information
-    UpdateContext *updateContext = (UpdateContext *)Context;
-
-    // Call the updated function that works with a boolean buffer
-    UpdateBufferWithParticles(updateContext->buffer, updateContext->particles,
-                              updateContext->start, updateContext->end,
-                              updateContext->bufferWidth, updateContext->bufferHeight);
-}
-
-void UpdateBufferWithParticlesBitBuffer(int *bitBuffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight)
-{
-    // Calculate the size of the bit buffer
-    int bitBufferSize = (bufferWidth * bufferHeight + 31) / 32; // +31 to round up to the nearest multiple of 32 bits
-
-    // Initialize bit buffer to 0, representing an empty or "black" state
-    memset(bitBuffer, 0, bitBufferSize * sizeof(int));
-
-    // Update bit buffer with particles
-    for (int i = start; i < end; i++)
-    {
-        int x = (int)particles->posX[i];
-        int y = (int)particles->posY[i];
-
-        // Ensure the particle is within the bounds of the buffer
-        if (x >= 0 && x < bufferWidth && y >= 0 && y < bufferHeight)
-        {
-            int index = y * bufferWidth + x; // Calculate the linear index
-            int bitIndex = index % 32;       // Find the bit index within the integer
-            int intIndex = index / 32;       // Find the integer index within the array
-
-            bitBuffer[intIndex] |= (1 << bitIndex); // Set the bit to indicate a particle is present
-        }
-    }
-}
-
-void CombineBuffersSIMD(int *bufferA, int *bufferB, int *finalBuffer, int bufferSize)
-{
-    // Process 8 integers at a time with AVX2
-    for (int i = 0; i <= bufferSize - 8; i += 8)
-    {
-        __m256i vA = _mm256_load_si256((__m256i *)&bufferA[i]); // Load 8 integers from bufferA
-        __m256i vB = _mm256_load_si256((__m256i *)&bufferB[i]); // Load 8 integers from bufferB
-        // compute with OR
-        __m256i a = _mm256_or_si256(vA, vB);     // OR
-        //__m256i a = _mm256_xor_si256(vA, vB);    // XOR
-        //__m256i a = _mm256_and_si256(vA, vB);    // AND         
-        _mm256_store_si256((__m256i *)&finalBuffer[i], a); // Store the result
-    }
-}
-
-// Helper function to pack a Color
-static inline uint32_t PackColor(Color color)
-{
-    return color.r | (color.g << 8) | (color.b << 16) | (color.a << 24);
-}
-
-void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSize)
-{
-    // Define colors in packed format
-    uint32_t packedBlack = PackColor((Color){0, 0, 0, 255});
-    uint32_t packedGray = PackColor((Color){130, 130, 130, 255});
-
-    __m256i vBlack = _mm256_set1_epi32(packedBlack);
-    __m256i vGray = _mm256_set1_epi32(packedGray);
-
-    for (int i = 0; i <= bufferSize - 8; i += 8)
-    {
-        __m256i mask = _mm256_loadu_si256((__m256i *)&finalBuffer[i]);    // Load 8 bools (as ints)
-        __m256i vMask = _mm256_cmpeq_epi32(mask, _mm256_setzero_si256()); // Compare mask elements to 0
-        __m256i vResult = _mm256_blendv_epi8(vBlack, vGray, vMask);       // Blend pixels based on mask
-        _mm256_storeu_si256((__m256i *)&pixels[i], vResult);              // Store the result
-    }
-}
+/**
+ * @brief Converts a boolean buffer to a pixel buffer using SIMD instructions.
+ *
+ * This function converts a boolean buffer to a pixel buffer using SIMD instructions to efficiently process
+ * multiple elements at once. It utilizes AVX2 instructions for SIMD (Single Instruction, Multiple Data)
+ * processing to efficiently convert a boolean buffer to a pixel buffer. The function processes the buffers
+ * in chunks of 8 elements at a time, which is the optimal size for AVX2 processing.
+ *
+ * @param finalBuffer A pointer to the boolean buffer to convert.
+ * @param pixels A pointer to the pixel buffer to store the converted result.
+ * @param bufferSize The number of elements in the buffers.
+ */
+void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSize);
 
 /* ========================================================================= */
 /*                            Main                                           */
@@ -279,7 +253,7 @@ int main(void)
     memset(bufferB, 0, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL));
     memset(finalBuffer, 0, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(BOOL));
 
-    Particles particles = CreateParticlesSIMD(PARTICLE_COUNT, SCREEN_WIDTH, SCREEN_HEIGHT);
+    Particles particles = CreateParticles(PARTICLE_COUNT, SCREEN_WIDTH, SCREEN_HEIGHT);
 
     // Define and initialize update contexts for each buffer
     UpdateContext updateContextA = {
@@ -300,8 +274,7 @@ int main(void)
         .bufferHeight = SCREEN_HEIGHT // Height of the buffer
     };
 
-    // Initialize your particle system here
-//#define PROFILING
+// #define PROFILING
 #ifdef PROFILING
     while (!WindowShouldClose())
     {
@@ -349,7 +322,7 @@ int main(void)
         Vector2 mousePos = GetMousePosition();
         UpdateParticlesMultithreaded(&particles, mousePos);
 
-        // update off-screen buffers with particles
+        // tranform particles to buffer
         PTP_WORK workItemA = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextA, &CallBackEnviron);
         PTP_WORK workItemB = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextB, &CallBackEnviron);
         SubmitThreadpoolWork(workItemA);
@@ -405,22 +378,7 @@ void setBufferColorSIMD(Color *pixels, int count, Color color)
     }
 }
 
-inline void UpdateOffScreenBufferWithParticles(Particles *particles, Color *pixels)
-{
-    // Clear the off-screen buffer to black
-    setBufferColorSIMD(pixels, SCREEN_WIDTH * SCREEN_HEIGHT, GRAY);
-
-    for (int i = 0; i < PARTICLE_COUNT; i++)
-    {
-        if (particles->posX[i] >= 0 && particles->posX[i] < SCREEN_WIDTH && particles->posY[i] >= 0 && particles->posY[i] < SCREEN_HEIGHT)
-        {
-            int index = (int)particles->posY[i] * SCREEN_WIDTH + (int)particles->posX[i];
-            pixels[index] = BLACK;
-        }
-    }
-}
-
-Particles CreateParticlesSIMD(int count, int screenWidth, int screenHeight)
+Particles CreateParticles(int count, int screenWidth, int screenHeight)
 {
     Particles p;
     p.count = count;
@@ -446,7 +404,6 @@ Particles CreateParticlesSIMD(int count, int screenWidth, int screenHeight)
 
     return p;
 }
-
 
 void FreeParticles(Particles *particles)
 {
@@ -558,4 +515,85 @@ void InitializeThreadPoolWithMaxThreads(PTP_POOL *pool, PTP_CALLBACK_ENVIRON cal
 
     // Associate the thread pool with the callback environment.
     SetThreadpoolCallbackPool(callBackEnviron, *pool);
+}
+
+void inline clearBufferSIMD(BOOL *buffer, int count)
+{
+    // Process 8 bools at a time with AVX2
+    for (int i = 0; i <= count - 8; i += 8)
+    {
+        _mm256_store_si256((__m256i *)&buffer[i], _mm256_setzero_si256());
+    }
+}
+
+void UpdateBufferWithParticles(BOOL *buffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight)
+{
+    clearBufferSIMD(buffer, bufferWidth * bufferHeight);
+
+    // Update buffer with particles
+    for (int i = start; i < end; i++)
+    {
+        int x = (int)particles->posX[i];
+        int y = (int)particles->posY[i];
+
+        // Ensure the particle is within the bounds of the buffer
+        if (x >= 0 && x < bufferWidth && y >= 0 && y < bufferHeight)
+        {
+            int index = y * bufferWidth + x;
+            buffer[index] = true; // Particle present at this position
+        }
+    }
+}
+
+void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+{
+    // Explicitly mark unused parameters to avoid compiler warnings
+    (void)Instance;
+    (void)Work;
+
+    // Convert context to our structure that holds necessary information
+    UpdateContext *updateContext = (UpdateContext *)Context;
+
+    // Call the updated function that works with a boolean buffer
+    UpdateBufferWithParticles(updateContext->buffer, updateContext->particles,
+                              updateContext->start, updateContext->end,
+                              updateContext->bufferWidth, updateContext->bufferHeight);
+}
+
+void CombineBuffersSIMD(int *bufferA, int *bufferB, int *finalBuffer, int bufferSize)
+{
+    // Process 8 integers at a time with AVX2
+    for (int i = 0; i <= bufferSize - 8; i += 8)
+    {
+        __m256i vA = _mm256_load_si256((__m256i *)&bufferA[i]); // Load 8 integers from bufferA
+        __m256i vB = _mm256_load_si256((__m256i *)&bufferB[i]); // Load 8 integers from bufferB
+        // compute with OR
+        __m256i a = _mm256_or_si256(vA, vB); // OR
+        //__m256i a = _mm256_xor_si256(vA, vB);    // XOR
+        //__m256i a = _mm256_and_si256(vA, vB);    // AND
+        _mm256_store_si256((__m256i *)&finalBuffer[i], a); // Store the result
+    }
+}
+
+static inline uint32_t PackColor(Color color)
+{
+    return color.r | (color.g << 8) | (color.b << 16) | (color.a << 24);
+}
+
+void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSize)
+{
+    // Define colors in packed format
+    uint32_t packedBlack = PackColor((Color){0, 0, 0, 255});
+    uint32_t packedGray = PackColor((Color){130, 130, 130, 255});
+
+    __m256i vBlack = _mm256_set1_epi32(packedBlack);
+    __m256i vGray = _mm256_set1_epi32(packedGray);
+
+    for (int i = 0; i <= bufferSize - 8; i += 8)
+    {
+        __m256i mask = _mm256_loadu_si256((__m256i *)&finalBuffer[i]);    // Load 8 bools (as ints)
+        __m256i vMask = _mm256_cmpeq_epi32(mask, _mm256_setzero_si256()); // Compare mask elements to 0
+        __m256i vResult = _mm256_blendv_epi8(vBlack, vGray, vMask);       // Blend pixels based on mask
+        _mm256_storeu_si256((__m256i *)&pixels[i], vResult);              // Store the result
+    }
 }

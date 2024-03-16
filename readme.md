@@ -7,7 +7,6 @@ Key highlights of the simulation architecture include:
 - Efficient Particle Data Structure: Utilizes SoA to improve cache efficiency and SIMD compatibility, storing particle positions and velocities in separate arrays.
 - SIMD Optimizations: Employs AVX2 instructions for vectorized operations, allowing multiple particle updates in parallel, significantly speeding up computations.
 - Multithreaded Updates: Leverages a thread pool for distributing particle updates across multiple threads, enhancing performance on multi-core systems.
-- Rendering with Raylib: Utilizes Raylib for rendering, employing a double-buffering technique to ensure smooth animations.
 - Resource Management: Ensures aligned memory allocations for efficient SIMD processing.
 - By integrating these approaches, the simulation achieves fluid motion and dynamic particle interactions, targeting high frame rates and delivering a visually compelling experience.
 

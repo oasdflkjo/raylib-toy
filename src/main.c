@@ -177,26 +177,51 @@ void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Con
                               updateContext->bufferWidth, updateContext->bufferHeight);
 }
 
-
-// Helper function to pack a Color
-static inline uint32_t PackColor(Color color)
+void UpdateBufferWithParticlesBitBuffer(int *bitBuffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight)
 {
-    return color.r | (color.g << 8) | (color.b << 16) | (color.a << 24);
+    // Calculate the size of the bit buffer
+    int bitBufferSize = (bufferWidth * bufferHeight + 31) / 32; // +31 to round up to the nearest multiple of 32 bits
+
+    // Initialize bit buffer to 0, representing an empty or "black" state
+    memset(bitBuffer, 0, bitBufferSize * sizeof(int));
+
+    // Update bit buffer with particles
+    for (int i = start; i < end; i++)
+    {
+        int x = (int)particles->posX[i];
+        int y = (int)particles->posY[i];
+
+        // Ensure the particle is within the bounds of the buffer
+        if (x >= 0 && x < bufferWidth && y >= 0 && y < bufferHeight)
+        {
+            int index = y * bufferWidth + x; // Calculate the linear index
+            int bitIndex = index % 32;       // Find the bit index within the integer
+            int intIndex = index / 32;       // Find the integer index within the array
+
+            bitBuffer[intIndex] |= (1 << bitIndex); // Set the bit to indicate a particle is present
+        }
+    }
 }
 
 void CombineBuffersSIMD(int *bufferA, int *bufferB, int *finalBuffer, int bufferSize)
 {
     // Process 8 integers at a time with AVX2
-    int i = 0;
-    for (; i <= bufferSize - 8; i += 8)
+    for (int i = 0; i <= bufferSize - 8; i += 8)
     {
         __m256i vA = _mm256_load_si256((__m256i *)&bufferA[i]); // Load 8 integers from bufferA
         __m256i vB = _mm256_load_si256((__m256i *)&bufferB[i]); // Load 8 integers from bufferB
         // compute with OR
-        __m256i vOR = _mm256_or_si256(vA, vB);
-        //__m256i vXOR = _mm256_xor_si256(vA, vB);                // Compute the XOR
-        _mm256_store_si256((__m256i *)&finalBuffer[i], vOR);   // Store the result
+        __m256i a = _mm256_or_si256(vA, vB);     // OR
+        //__m256i a = _mm256_xor_si256(vA, vB);    // XOR
+        //__m256i a = _mm256_and_si256(vA, vB);    // AND         
+        _mm256_store_si256((__m256i *)&finalBuffer[i], a); // Store the result
     }
+}
+
+// Helper function to pack a Color
+static inline uint32_t PackColor(Color color)
+{
+    return color.r | (color.g << 8) | (color.b << 16) | (color.a << 24);
 }
 
 void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSize)
@@ -208,8 +233,7 @@ void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSi
     __m256i vBlack = _mm256_set1_epi32(packedBlack);
     __m256i vGray = _mm256_set1_epi32(packedGray);
 
-    int i = 0;
-    for (; i <= bufferSize - 8; i += 8)
+    for (int i = 0; i <= bufferSize - 8; i += 8)
     {
         __m256i mask = _mm256_loadu_si256((__m256i *)&finalBuffer[i]);    // Load 8 bools (as ints)
         __m256i vMask = _mm256_cmpeq_epi32(mask, _mm256_setzero_si256()); // Compare mask elements to 0
@@ -223,9 +247,7 @@ void ConvertBoolToPixelsSIMD(const int *finalBuffer, Color *pixels, int bufferSi
 /* ========================================================================= */
 int main(void)
 {
-
-    assert(PARTICLE_COUNT % 4 == 0 && "Particle count must be a multiple of 4 for SIMD operations");
-    assert(PARTICLE_COUNT % 16 == 0 && "Particle count must be a multiple of 16 for multithreading");
+    assert(PARTICLE_COUNT % 8 == 0 && "Particle count must be a multiple of 8 for AVX2 processing!");
 
     // Initialize the thread pool environment and set the maximum number of threads.
     PTP_POOL pool;
@@ -238,9 +260,12 @@ int main(void)
     SetWindowState(FLAG_FULLSCREEN_MODE);
     SetTargetFPS(TARGET_FPS);
     InitAudioDevice(); // Initialize audio device
-    Music music = LoadMusicStream("perfect-beauty-191271.mp3");
+    Music music = LoadMusicStream("midnight-forest-184304.mp3");
     PlayMusicStream(music);
+    int centerX = SCREEN_WIDTH / 2;
+    int centerY = SCREEN_HEIGHT / 2;
     HideCursor(); // Hide the system cursor
+    SetMousePosition(centerX, centerY);
     Color redDotColor = RED;
     float redDotRadius = 5.0f; // Size of the red dot
     RenderTexture2D mainBuffer = LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -276,12 +301,20 @@ int main(void)
     };
 
     // Initialize your particle system here
-
+//#define PROFILING
+#ifdef PROFILING
     while (!WindowShouldClose())
     {
-        UpdateMusicStream(music);
+        double startTime = GetTime();
+
+        // Particles update
+        double particlesStartTime = GetTime();
         Vector2 mousePos = GetMousePosition();
         UpdateParticlesMultithreaded(&particles, mousePos);
+        TraceLog(LOG_INFO, "Particles update took %f seconds", GetTime() - particlesStartTime);
+
+        // Threadpool work
+        double threadPoolStartTime = GetTime();
         PTP_WORK workItemA = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextA, &CallBackEnviron);
         PTP_WORK workItemB = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextB, &CallBackEnviron);
         SubmitThreadpoolWork(workItemA);
@@ -290,15 +323,55 @@ int main(void)
         WaitForThreadpoolWorkCallbacks(workItemB, FALSE);
         CloseThreadpoolWork(workItemA);
         CloseThreadpoolWork(workItemB);
+        TraceLog(LOG_INFO, "Threadpool work took %f seconds", GetTime() - threadPoolStartTime);
+
+        // Buffers combination and conversion
+        double bufferStartTime = GetTime();
         CombineBuffersSIMD(bufferA, bufferB, finalBuffer, SCREEN_WIDTH * SCREEN_HEIGHT);
         ConvertBoolToPixelsSIMD(finalBuffer, pixels, SCREEN_WIDTH * SCREEN_HEIGHT);
+        TraceLog(LOG_INFO, "Buffers combination and conversion took %f seconds", GetTime() - bufferStartTime);
+
+        // Texture update and drawing
+        double drawingStartTime = GetTime();
         UpdateTexture(mainBuffer.texture, pixels);
         BeginDrawing();
         DrawTexture(mainBuffer.texture, 0, 0, WHITE);
         DrawCircleV(mousePos, redDotRadius, redDotColor);
         EndDrawing();
-    }
+        TraceLog(LOG_INFO, "Texture update and drawing took %f seconds", GetTime() - drawingStartTime);
 
+        TraceLog(LOG_INFO, "Total loop iteration took %f seconds", GetTime() - startTime);
+    }
+#else
+    while (!WindowShouldClose())
+    {
+        UpdateMusicStream(music);
+        Vector2 mousePos = GetMousePosition();
+        UpdateParticlesMultithreaded(&particles, mousePos);
+
+        // update off-screen buffers with particles
+        PTP_WORK workItemA = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextA, &CallBackEnviron);
+        PTP_WORK workItemB = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextB, &CallBackEnviron);
+        SubmitThreadpoolWork(workItemA);
+        SubmitThreadpoolWork(workItemB);
+        WaitForThreadpoolWorkCallbacks(workItemA, FALSE);
+        WaitForThreadpoolWorkCallbacks(workItemB, FALSE);
+        CloseThreadpoolWork(workItemA);
+        CloseThreadpoolWork(workItemB);
+
+        // combine buffers and convert to pixels
+        CombineBuffersSIMD(bufferA, bufferB, finalBuffer, SCREEN_WIDTH * SCREEN_HEIGHT);
+        ConvertBoolToPixelsSIMD(finalBuffer, pixels, SCREEN_WIDTH * SCREEN_HEIGHT);
+
+        // update texture and draw
+        UpdateTexture(mainBuffer.texture, pixels);
+        BeginDrawing();
+        DrawTexture(mainBuffer.texture, 0, 0, WHITE);
+        DrawCircleV(mousePos, redDotRadius, redDotColor);
+        DrawFPS(10, 10);
+        EndDrawing();
+    }
+#endif
     FreeParticles(&particles);
 
     // Close the window and clean up resources
@@ -356,31 +429,24 @@ Particles CreateParticlesSIMD(int count, int screenWidth, int screenHeight)
     p.velX = (float *)_aligned_malloc(count * sizeof(float), 32);
     p.velY = (float *)_aligned_malloc(count * sizeof(float), 32);
 
-    // Assume a uniform distribution of particles across the screen
+    // Place particles in a scanline manner, starting from the top-left pixel.
+    // Continue "below" the screen if there are more particles than fit on the screen.
     for (int i = 0; i < count; ++i)
     {
-        // Calculate the position based on the particle index
         int x = i % screenWidth;
         int y = i / screenWidth;
-
-        // Ensure we don't place particles outside the screen boundaries
-        if (y >= screenHeight)
-        {
-            // If we've exceeded the screen height, place the particle at the bottom right
-            x = screenWidth - 1;
-            y = screenHeight - 1;
-        }
 
         p.posX[i] = (float)x;
         p.posY[i] = (float)y;
 
-        // For velocity, you might want to initialize to zero or some default value
-        p.velX[i] = 0.0f; // Consider giving a small random value if you want initial movement
-        p.velY[i] = 0.0f; // Consider giving a small random value if you want initial movement
+        // Initialize velocity to zero or a small random value for initial movement
+        p.velX[i] = 0.0f;
+        p.velY[i] = 0.0f;
     }
 
     return p;
 }
+
 
 void FreeParticles(Particles *particles)
 {

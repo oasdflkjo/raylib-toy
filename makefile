@@ -7,8 +7,8 @@ all: raylib main
 raylib:
 	cd external/raylib/src && make
 
-main: src/main.c src/threadpool.c include/threadpool.h
-	$(CC) $(CFLAGS) src/main.c src/threadpool.c $(LDFLAGS) -o main
+main: src/main.c
+	$(CC) $(CFLAGS) src/main.c $(LDFLAGS) -o main
 
 clean:
 	rm -f main

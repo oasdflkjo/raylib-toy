@@ -1,7 +1,22 @@
-// TODO: wrap buffers to a struct to possibly increase data locality for simd operations
-// TODO: fps text is jumping around, fix text to be in the same position
-// TODO: wait for the first
-// TODO: ramp up the constnats to have a smoother start animation
+/**
+ * @file particle_system.c
+ * @brief Particle System Simulation using Raylib and SIMD Instructions.
+ *
+ * This file contains the implementation of a particle system simulation,
+ * utilizing the Raylib library for rendering and the Windows Thread Pool API
+ * for multithreading. It demonstrates advanced techniques such as SIMD
+ * instructions for efficient computation, dynamic memory allocation for
+ * particle data, and the use of boolean buffers for particle state representation.
+ * The simulation includes particle attraction to mouse position, friction effects,
+ * and rendering optimizations.
+ *
+ * @author oasdflkjo
+ * @date 2024-03-16
+ *
+ * @see https://www.raylib.com/
+ * @see https://docs.microsoft.com/en-us/windows/win32/procthread/using-the-thread-pool-functions
+ */
+
 /* ========================================================================= */
 /*                             Header Includes                               */
 /* ========================================================================= */
@@ -27,11 +42,11 @@
 /* ========================================================================= */
 /*                            Defines                                        */
 /* ========================================================================= */
-#define PARTICLE_COUNT 8000 // 360000 // 720000 // 1440000 // 2880000 // 5760000 // 4953600
+#define PARTICLE_COUNT 3096000 // 360000 // 720000 // 1440000 // 2880000 // 5760000 // 4953600 // 2476800
 #define MAX_THREADS 12
-#define TARGET_FPS 160
+#define TARGET_FPS 80
 #define ATTRACTION_STRENGHT 0.2000f // 0.2000f
-#define FRICTION 0.999f // 0.999f
+#define FRICTION 0.999f             // 0.999f
 #define SCREEN_WIDTH 3440
 #define SCREEN_HEIGHT 1440
 
@@ -143,36 +158,34 @@ void CALLBACK UpdateParticlesWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID 
 void InitializeThreadPoolWithMaxThreads(PTP_POOL *pool, PTP_CALLBACK_ENVIRON callBackEnviron, DWORD maxThreads);
 
 /**
- * @brief Updates a boolean buffer with the positions of particles.
+ * @brief Sets the color of a buffer using SIMD instructions.
  *
- * This function updates a boolean buffer with the positions of particles. It sets the buffer
- * to true at the positions of the particles and false at all other positions. The function
- * processes the particles in a specified range and updates the buffer based on their positions.
+ * This function sets the color of a buffer using SIMD instructions to efficiently process
+ * multiple pixels at once. It utilizes AVX2 instructions for SIMD (Single Instruction, Multiple Data)
+ * processing to efficiently set the color of a buffer to a specified value. The function processes
+ * the buffer in chunks of 8 pixels at a time, which is the optimal size for AVX2 processing.
  *
- * @param buffer A pointer to the boolean buffer to update.
- * @param particles A pointer to the Particles structure containing the particle positions.
- * @param start The starting index of the particles to update.
- * @param end The ending index of the particles to update.
- * @param bufferWidth The width of the buffer.
- * @param bufferHeight The height of the buffer.
+ * @param pixels A pointer to the buffer to set the color of.
+ * @param count The number of pixels in the buffer.
+ * @param color The color to set the buffer to.
  */
-void UpdateBufferWithParticles(BOOL *buffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight);
+void UpdateBufferWithParticleDensity(int *buffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight);
 
-/**
- * @brief Callback function for updating a boolean buffer with particle positions in a multithreaded environment.
- *
- * This function is called by a thread pool work item to update a boolean buffer with the positions of particles.
- * It sets the buffer to true at the positions of the particles and false at all other positions. The function
- * processes the particles in a specified range and updates the buffer based on their positions. It is designed
- * to be used with the Windows Thread Pool API and expects the Context parameter to be of type (UpdateContext*).
- *
- * @param Instance Unused. A pointer to a TP_CALLBACK_INSTANCE structure that defines the callback instance.
- * @param Context A pointer to user-defined data passed to the function. This should be a pointer to an UpdateContext
- *                structure containing information about the boolean buffer to update, the range of particles this
- *                callback is responsible for, and the dimensions of the buffer.
- * @param Work Unused. A pointer to a TP_WORK structure that represents the work item that generated the callback.
- */
-void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work);
+    /**
+     * @brief Callback function for updating a boolean buffer with particle positions in a multithreaded environment.
+     *
+     * This function is called by a thread pool work item to update a boolean buffer with the positions of particles.
+     * It sets the buffer to true at the positions of the particles and false at all other positions. The function
+     * processes the particles in a specified range and updates the buffer based on their positions. It is designed
+     * to be used with the Windows Thread Pool API and expects the Context parameter to be of type (UpdateContext*).
+     *
+     * @param Instance Unused. A pointer to a TP_CALLBACK_INSTANCE structure that defines the callback instance.
+     * @param Context A pointer to user-defined data passed to the function. This should be a pointer to an UpdateContext
+     *                structure containing information about the boolean buffer to update, the range of particles this
+     *                callback is responsible for, and the dimensions of the buffer.
+     * @param Work Unused. A pointer to a TP_WORK structure that represents the work item that generated the callback.
+     */
+    void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work);
 
 /**
  * @brief Sets the color of a buffer using SIMD instructions.
@@ -195,22 +208,7 @@ static inline uint32_t PackColor(Color color);
  * @param height The height of the buffer.
  * @return A pointer to the allocated buffer or NULL if allocation fails.
  */
-BOOL *AllocateAlignedBoolBuffer(int width, int height)
-{
-    // Calculate the total size needed for the buffer.
-    size_t totalSize = width * height * sizeof(BOOL);
-
-    // Allocate the memory with specified alignment.
-    BOOL *buffer = (BOOL *)_aligned_malloc(totalSize, 32);
-
-    // Optionally, you can initialize the buffer to false (0) here.
-    if (buffer)
-    {
-        memset(buffer, 0, totalSize);
-    }
-
-    return buffer;
-}
+BOOL *AllocateAlignedIntBuffer(int width, int height);
 
 /**
  * @brief Sets the color of a buffer using SIMD instructions.
@@ -226,6 +224,45 @@ BOOL *AllocateAlignedBoolBuffer(int width, int height)
  */
 void CombineBuffersAndConvertToPixelsSIMD(const BOOL *bufferA, const BOOL *bufferB, Color *pixels, int bufferSize);
 
+void ApplyDensityToPixelsSIMD(const int *densityBuffer, Color *pixels, int bufferSize, int maxDensity) {
+    for (int i = 0; i < bufferSize; i += 8) {
+        // Load 8 density values
+        __m256i density = _mm256_load_si256((__m256i *)(densityBuffer + i));
+        
+        // Map density to brightness (simple linear mapping capped by maxDensity)
+        // Note: Adjust the scaling factor based on your desired visual effect and maxDensity
+        __m256 scale = _mm256_set1_ps(255.0f / maxDensity);
+        __m256i brightness = _mm256_min_epi32(_mm256_cvtps_epi32(_mm256_mul_ps(_mm256_cvtepi32_ps(density), scale)), _mm256_set1_epi32(255));
+
+        // Expand brightness to RGBA (assuming we set R=G=B for grayscale and A=255 for full opacity)
+        __m256i r = brightness;
+        __m256i g = brightness;
+        __m256i b = brightness;
+        __m256i a = _mm256_set1_epi32(255);
+
+        // Pack R, G, B, and A into a single 32-bit integer per pixel
+        __m256i color = _mm256_or_si256(_mm256_or_si256(r, _mm256_slli_epi32(g, 8)), _mm256_or_si256(_mm256_slli_epi32(b, 16), _mm256_slli_epi32(a, 24)));
+
+        // Store the result
+        _mm256_storeu_si256((__m256i *)(pixels + i), color);
+    }
+}
+
+void CombineDensityBuffers(const int *bufferA, const int *bufferB, int *combinedBuffer, int bufferSize) {
+    for (int i = 0; i < bufferSize; i += 8) {
+        // Load 8 elements from each buffer
+        __m256i a = _mm256_load_si256((__m256i *)(bufferA + i));
+        __m256i b = _mm256_load_si256((__m256i *)(bufferB + i));
+
+        // Combine buffers by adding values
+        __m256i combined = _mm256_add_epi32(a, b);
+
+        // Store the result
+        _mm256_storeu_si256((__m256i *)(combinedBuffer + i), combined);
+    }
+}
+
+
 /* ========================================================================= */
 /*                            Main                                           */
 /* ========================================================================= */
@@ -237,31 +274,27 @@ int main(void)
     PTP_POOL pool;
     InitializeThreadPoolWithMaxThreads(&pool, &CallBackEnviron, 12);
 
-    // Initialize the screen width and height to the monitor's size
-    int screenWidth = GetMonitorWidth(0);
-    int screenHeight = GetMonitorHeight(0);
-    InitWindow(screenWidth, screenHeight, "Particle System");
+    // Initialize the window and set the target frame rate
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Particle System");
     SetWindowState(FLAG_FULLSCREEN_MODE);
     SetTargetFPS(TARGET_FPS);
 
     // Initialize audio device
-    InitAudioDevice(); 
-    Music music = LoadMusicStream("midnight-forest-184304.mp3");
+    InitAudioDevice();
+    Music music = LoadMusicStream("legendary-cinematic-piano-by-ob-13554-1min.mp3");
     PlayMusicStream(music);
 
     HideCursor(); // Hide the system cursor
     // Set the initial position of the mouse to the center of the screen
-    int centerX = SCREEN_WIDTH / 2;
-    int centerY = SCREEN_HEIGHT / 2;
-    SetMousePosition(centerX, centerY);
+    SetMousePosition(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
 
     // Load the main render texture and allocate memory for the pixel buffer
     RenderTexture2D mainBuffer = LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT);
     Color *pixels = (Color *)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(Color));
 
     // Allocate aligned memory for the buffers
-    BOOL *bufferA = AllocateAlignedBoolBuffer(SCREEN_WIDTH, SCREEN_HEIGHT);
-    BOOL *bufferB = AllocateAlignedBoolBuffer(SCREEN_WIDTH, SCREEN_HEIGHT);
+    int *bufferA = AllocateAlignedIntBuffer(SCREEN_WIDTH, SCREEN_HEIGHT);
+    int *bufferB = AllocateAlignedIntBuffer(SCREEN_WIDTH, SCREEN_HEIGHT);
 
     Particles particles = CreateParticles(PARTICLE_COUNT, SCREEN_WIDTH, SCREEN_HEIGHT);
 
@@ -284,50 +317,12 @@ int main(void)
         .bufferHeight = SCREEN_HEIGHT // Height of the buffer
     };
 
-// #define PROFILING
-#ifdef PROFILING
-    while (!WindowShouldClose())
-    {
-        double startTime = GetTime();
-
-        // Particles update
-        double particlesStartTime = GetTime();
-        Vector2 mousePos = GetMousePosition();
-        UpdateParticlesMultithreaded(&particles, mousePos);
-        TraceLog(LOG_INFO, "Particles update took %f seconds", GetTime() - particlesStartTime);
-
-        // Threadpool work
-        double threadPoolStartTime = GetTime();
-        PTP_WORK workItemA = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextA, &CallBackEnviron);
-        PTP_WORK workItemB = CreateThreadpoolWork(UpdateBufferWorkCallback, &updateContextB, &CallBackEnviron);
-        SubmitThreadpoolWork(workItemA);
-        SubmitThreadpoolWork(workItemB);
-        WaitForThreadpoolWorkCallbacks(workItemA, FALSE);
-        WaitForThreadpoolWorkCallbacks(workItemB, FALSE);
-        CloseThreadpoolWork(workItemA);
-        CloseThreadpoolWork(workItemB);
-        TraceLog(LOG_INFO, "Threadpool work took %f seconds", GetTime() - threadPoolStartTime);
-
-        // Buffers combination and conversion
-        double bufferStartTime = GetTime();
-        TraceLog(LOG_INFO, "Buffers combination and conversion took %f seconds", GetTime() - bufferStartTime);
-
-        // Texture update and drawing
-        double drawingStartTime = GetTime();
-        UpdateTexture(mainBuffer.texture, pixels);
-        BeginDrawing();
-        DrawTexture(mainBuffer.texture, 0, 0, WHITE);
-        DrawCircleV(mousePos, redDotRadius, redDotColor);
-        EndDrawing();
-        TraceLog(LOG_INFO, "Texture update and drawing took %f seconds", GetTime() - drawingStartTime);
-
-        TraceLog(LOG_INFO, "Total loop iteration took %f seconds", GetTime() - startTime);
-    }
-#else
     while (!WindowShouldClose())
     {
         UpdateMusicStream(music);
         Vector2 mousePos = GetMousePosition();
+
+        // update particles state
         UpdateParticlesMultithreaded(&particles, mousePos);
 
         // tranform particles to buffer
@@ -340,7 +335,9 @@ int main(void)
         CloseThreadpoolWork(workItemA);
         CloseThreadpoolWork(workItemB);
 
-        CombineBuffersAndConvertToPixelsSIMD(bufferA, bufferB, pixels, SCREEN_WIDTH * SCREEN_HEIGHT);
+        // combine buffers and transform to pixels
+        CombineDensityBuffers(bufferA, bufferB, bufferA, SCREEN_WIDTH * SCREEN_HEIGHT);
+        ApplyDensityToPixelsSIMD(bufferA, pixels, SCREEN_WIDTH * SCREEN_HEIGHT, 50);
 
         // update texture and draw
         UpdateTexture(mainBuffer.texture, pixels);
@@ -350,8 +347,21 @@ int main(void)
         DrawFPS(10, 10);
         EndDrawing();
     }
-#endif
+
     FreeParticles(&particles);
+
+    // Unload the music stream
+    UnloadMusicStream(music);
+    // De-initialize audio device
+    CloseAudioDevice();
+
+    // Unload the render texture and free the pixel buffer
+    UnloadRenderTexture(mainBuffer);
+    free(pixels);
+
+    // Free the allocated memory for the boolean buffers
+    _aligned_free(bufferA);
+    _aligned_free(bufferB);
 
     // Close the window and clean up resources
     CloseWindow();
@@ -532,25 +542,6 @@ void inline clearBufferSIMD(BOOL *buffer, int count)
     }
 }
 
-void UpdateBufferWithParticles(BOOL *buffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight)
-{
-    clearBufferSIMD(buffer, bufferWidth * bufferHeight);
-
-    // Update buffer with particles
-    for (int i = start; i < end; i++)
-    {
-        int x = (int)particles->posX[i];
-        int y = (int)particles->posY[i];
-
-        // Ensure the particle is within the bounds of the buffer
-        if (x >= 0 && x < bufferWidth && y >= 0 && y < bufferHeight)
-        {
-            int index = y * bufferWidth + x;
-            buffer[index] = true; // Particle present at this position
-        }
-    }
-}
-
 void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 {
     // Explicitly mark unused parameters to avoid compiler warnings
@@ -561,40 +552,72 @@ void CALLBACK UpdateBufferWorkCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Con
     UpdateContext *updateContext = (UpdateContext *)Context;
 
     // Call the updated function that works with a boolean buffer
-    UpdateBufferWithParticles(updateContext->buffer, updateContext->particles,
-                              updateContext->start, updateContext->end,
-                              updateContext->bufferWidth, updateContext->bufferHeight);
+    UpdateBufferWithParticleDensity(updateContext->buffer, updateContext->particles,
+                                    updateContext->start, updateContext->end,
+                                    updateContext->bufferWidth, updateContext->bufferHeight);
 }
 
+// Move inline definition to the header or right before its first use.
 static inline uint32_t PackColor(Color color)
 {
     return color.r | (color.g << 8) | (color.b << 16) | (color.a << 24);
 }
 
-void CombineBuffersAndConvertToPixelsSIMD(const BOOL *bufferA, const BOOL *bufferB, Color *pixels, int bufferSize) {
+void CombineBuffersAndConvertToPixelsSIMD(const BOOL *bufferA, const BOOL *bufferB, Color *pixels, int bufferSize)
+{
     // Define colors in packed format for SIMD
-    uint32_t packedTrueColor = PackColor((Color){0, 0, 0, 255}); // Black
+    uint32_t packedTrueColor = PackColor((Color){0, 0, 0, 255});        // Black
     uint32_t packedFalseColor = PackColor((Color){130, 130, 130, 255}); // Gray
 
     __m256i vTrueColor = _mm256_set1_epi32(packedTrueColor);
     __m256i vFalseColor = _mm256_set1_epi32(packedFalseColor);
 
-    for (int i = 0; i <= bufferSize - 8; i += 8) {
+    for (int i = 0; i <= bufferSize - 8; i += 8)
+    {
         __m256i vA = _mm256_load_si256((const __m256i *)&bufferA[i]); // Load 8 elements from bufferA
         __m256i vB = _mm256_load_si256((const __m256i *)&bufferB[i]); // Load 8 elements from bufferB
 
         // Combine buffers using OR (or any other logical operation you prefer)
         __m256i combined = _mm256_or_si256(vA, vB);
-        //__m256i combined = _mm256_xor_si256(vA, vB); 
+        //__m256i combined = _mm256_xor_si256(vA, vB);
 
         // Generate a mask based on the combined result to select between trueColor and falseColor
         // Assuming non-zero values in combined mean true, and zero means false
         __m256i mask = _mm256_cmpeq_epi32(combined, _mm256_setzero_si256()); // Elements are 0xFFFFFFFF if false, 0x0 if true
-        
+
         // Blend pixels based on the mask: true values select from vTrueColor, false values from vFalseColor
         __m256i result = _mm256_blendv_epi8(vTrueColor, vFalseColor, mask);
 
         // Store the result directly into the pixels array
         _mm256_storeu_si256((__m256i *)&pixels[i], result);
+    }
+}
+
+// Corrected AllocateAlignedIntBuffer function for int buffer
+int *AllocateAlignedIntBuffer(int width, int height)
+{
+    size_t totalSize = width * height * sizeof(int);
+    int *buffer = (int *)_aligned_malloc(totalSize, 32);
+    if (buffer)
+    {
+        memset(buffer, 0, totalSize);
+    }
+    return buffer;
+}
+
+void UpdateBufferWithParticleDensity(int *buffer, Particles *particles, int start, int end, int bufferWidth, int bufferHeight)
+{
+    // Clear buffer to 0 for each frame
+    memset(buffer, 0, bufferWidth * bufferHeight * sizeof(int));
+
+    for (int i = start; i < end; i++)
+    {
+        int x = (int)particles->posX[i];
+        int y = (int)particles->posY[i];
+        if (x >= 0 && x < bufferWidth && y >= 0 && y < bufferHeight)
+        {
+            int index = y * bufferWidth + x;
+            buffer[index] += 1; // Increment count
+        }
     }
 }
